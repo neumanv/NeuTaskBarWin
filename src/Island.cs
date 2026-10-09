@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.InteropServices;
 
 namespace NeuTaskBar
@@ -15,8 +15,17 @@ namespace NeuTaskBar
         public Action OnAnyMouseDown;   // cualquier botón pulsado sobre la isla (cierra menús abiertos)
         public int Dpi = 96;
         public int VisW, VisH;          // tamaño visible (px)
-        protected int ovL, ovR, ovB;    // saliente fuera de pantalla (para ocultar las esquinas redondeadas pegadas al borde)
-        int anchorX, anchorY;
+        protected int ovL, ovT, ovR, ovB; // saliente fuera de pantalla (para ocultar las esquinas redondeadas pegadas al borde)
+        Edge edge = Edge.Bottom;
+        int cross, along;
+        // Alineación centrada (como "Alineación de la barra de tareas: Centro"): la isla se centra en CenterPos
+        // sin salirse de [CenterMin, CenterMax] a lo largo de la barra.
+        public bool Centered;
+        public int CenterPos, CenterMin, CenterMax;
+        // Ocultación automática: la isla se desliza fuera de la pantalla hacia su borde.
+        Ease hideE;
+        int hideDist;
+        bool autoHidden;
         readonly bool anchorRight;
         const uint AnimTimerId = 100;
         bool animating;
@@ -97,6 +106,7 @@ namespace NeuTaskBar
                         lastTick = now;
                         if (dt > 0.1f) dt = 0.1f;
                         bool more = OnAnimTick(dt);
+                        if (hideE.Step(dt, 15f, 0.004f)) { Reposition(); more = true; }
                         Invalidate();
                         if (!more) { Native.KillTimer(Hwnd, new UIntPtr(AnimTimerId)); animating = false; }
                         return IntPtr.Zero;
@@ -112,17 +122,17 @@ namespace NeuTaskBar
                         Native.TrackMouseEvent(ref t);
                         tracking = true;
                     }
-                    OnMouseMove(Native.LoWord(lParam) - ovL, Native.HiWord(lParam));
+                    OnMouseMove(Native.LoWord(lParam) - ovL, Native.HiWord(lParam) - ovT);
                     return IntPtr.Zero;
                 case Native.WM_MOUSELEAVE: tracking = false; OnMouseLeave(); return IntPtr.Zero;
                 case 0x204: // WM_RBUTTONDOWN
                 case 0x207: // WM_MBUTTONDOWN
                     if (OnAnyMouseDown != null) OnAnyMouseDown();
                     return IntPtr.Zero;
-                case Native.WM_LBUTTONDOWN: if (OnAnyMouseDown != null) OnAnyMouseDown(); OnMouseButton(0, true, Native.LoWord(lParam) - ovL, Native.HiWord(lParam)); return IntPtr.Zero;
-                case Native.WM_LBUTTONUP: OnMouseButton(0, false, Native.LoWord(lParam) - ovL, Native.HiWord(lParam)); return IntPtr.Zero;
-                case Native.WM_MBUTTONUP: OnMouseButton(1, false, Native.LoWord(lParam) - ovL, Native.HiWord(lParam)); return IntPtr.Zero;
-                case Native.WM_RBUTTONUP: OnMouseButton(2, false, Native.LoWord(lParam) - ovL, Native.HiWord(lParam)); return IntPtr.Zero;
+                case Native.WM_LBUTTONDOWN: if (OnAnyMouseDown != null) OnAnyMouseDown(); OnMouseButton(0, true, Native.LoWord(lParam) - ovL, Native.HiWord(lParam) - ovT); return IntPtr.Zero;
+                case Native.WM_LBUTTONUP: OnMouseButton(0, false, Native.LoWord(lParam) - ovL, Native.HiWord(lParam) - ovT); return IntPtr.Zero;
+                case Native.WM_MBUTTONUP: OnMouseButton(1, false, Native.LoWord(lParam) - ovL, Native.HiWord(lParam) - ovT); return IntPtr.Zero;
+                case Native.WM_RBUTTONUP: OnMouseButton(2, false, Native.LoWord(lParam) - ovL, Native.HiWord(lParam) - ovT); return IntPtr.Zero;
                 case Native.WM_MOUSEWHEEL:
                     OnWheel(Native.HiWord(wParam));
                     return IntPtr.Zero;
@@ -188,11 +198,35 @@ namespace NeuTaskBar
             }
         }
 
-        // Fija el punto de anclaje (esquina inferior-izquierda o inferior-derecha visible) y reposiciona.
-        public void SetAnchor(int x, int y)
+        public Edge Edge { get { return edge; } }
+        protected bool Vert { get { return edge == Edge.Left || edge == Edge.Right; } }
+
+        // Coordenadas lógicas (u a lo largo de la isla, v a lo ancho) a físicas (x, y), y al revés.
+        protected void MapRect(float u, float v, float du, float dv, out float x, out float y, out float w, out float h)
         {
-            anchorX = x;
-            anchorY = y;
+            if (Vert) { x = v; y = u; w = dv; h = du; }
+            else { x = u; y = v; w = du; h = dv; }
+        }
+
+        protected RECT MapRectI(float u, float v, float du, float dv)
+        {
+            float x, y, w, h;
+            MapRect(u, v, du, dv, out x, out y, out w, out h);
+            return new RECT((int)x, (int)y, (int)(x + w), (int)(y + h));
+        }
+
+        protected void Unmap(int x, int y, out int u, out int v)
+        {
+            if (Vert) { u = y; v = x; } else { u = x; v = y; }
+        }
+
+        // Fija el borde de pantalla, la coordenada del lado de la barra pegado a ese borde (cross) y el punto de
+        // arranque a lo largo de la barra (along): izquierda/arriba si la isla se ancla al inicio, derecha/abajo si al final.
+        public void SetPlacement(Edge e, int crossPos, int alongPos)
+        {
+            edge = e;
+            cross = crossPos;
+            along = alongPos;
             if (VisW > 0) Reposition();
         }
 
@@ -201,22 +235,74 @@ namespace NeuTaskBar
             return Native.MonitorFromPoint(new POINT(x, y), 0) != IntPtr.Zero;
         }
 
+        bool FullyHidden { get { return autoHidden && hideE.V >= 0.999f; } }
+
+        public bool AutoHidden { get { return autoHidden; } }
+
+        // Oculta o muestra la isla deslizándola hacia su borde de pantalla (dist = recorrido en píxeles).
+        public void SetAutoHidden(bool hidden, int dist)
+        {
+            if (hidden == autoHidden && dist == hideDist) return;
+            autoHidden = hidden;
+            hideDist = dist;
+            hideE.T = hidden ? 1f : 0f;
+            // Si hay otro monitor al otro lado del borde, no se desliza (se vería pasar por él): aparece y desaparece.
+            RECT w;
+            Native.GetWindowRect(Hwnd, out w);
+            int mx = (w.Left + w.Right) / 2, my = (w.Top + w.Bottom) / 2, far = S(70);
+            bool neighbour = edge == Edge.Bottom ? HasMonitorAt(mx, cross + far) : edge == Edge.Top ? HasMonitorAt(mx, cross - far)
+                : edge == Edge.Left ? HasMonitorAt(cross - far, my) : HasMonitorAt(cross + far, my);
+            if (neighbour) hideE.V = hideE.T;
+            Reposition();
+            StartAnim();
+        }
+
         protected void Reposition()
         {
-            int x = anchorRight ? anchorX - VisW : anchorX;
-            int y = anchorY - VisH;
+            bool vert = Vert;
+            int pw = vert ? VisH : VisW, ph = vert ? VisW : VisH;
+            int len = vert ? ph : pw;
+            int start = anchorRight ? along - len : along;
+            if (Centered)
+            {
+                start = Math.Min(CenterPos - len / 2, CenterMax - len);
+                start = Math.Max(start, CenterMin);
+            }
+            int x, y;
+            if (vert)
+            {
+                x = edge == Edge.Left ? cross : cross - pw;
+                y = start;
+            }
+            else
+            {
+                x = start;
+                y = edge == Edge.Top ? cross : cross - ph;
+            }
 
-            ovL = ovR = ovB = 0;
+            ovL = ovT = ovR = ovB = 0;
             if (IsWin11)
             {
                 // Las esquinas redondeadas de DWM quedan fuera de pantalla en los bordes pegados, sin invadir otros monitores.
                 int r = S(12);
-                if (!HasMonitorAt(x + 1, anchorY + 1)) ovB = r;
-                if (!anchorRight && !HasMonitorAt(x - 1, y + VisH / 2)) ovL = r;
-                if (anchorRight && !HasMonitorAt(x + VisW + 1, y + VisH / 2)) ovR = r;
+                if (!HasMonitorAt(x - 1, y + ph / 2)) ovL = r;
+                if (!HasMonitorAt(x + pw + 1, y + ph / 2)) ovR = r;
+                if (!HasMonitorAt(x + pw / 2, y - 1)) ovT = r;
+                if (!HasMonitorAt(x + pw / 2, y + ph + 1)) ovB = r;
             }
-            Native.SetWindowPos(Hwnd, Native.HWND_TOPMOST, x - ovL, y, VisW + ovL + ovR, VisH + ovB,
-                Native.SWP_NOACTIVATE | Native.SWP_NOOWNERZORDER | (shown ? Native.SWP_SHOWWINDOW : 0u));
+
+            int off = (int)Math.Round(hideE.V * hideDist);
+            if (off != 0)
+            {
+                if (edge == Edge.Bottom) y += off;
+                else if (edge == Edge.Top) y -= off;
+                else if (edge == Edge.Left) x -= off;
+                else x += off;
+            }
+            bool vis = shown && !FullyHidden;
+            Native.SetWindowPos(Hwnd, Native.HWND_TOPMOST, x - ovL, y - ovT, pw + ovL + ovR, ph + ovT + ovB,
+                Native.SWP_NOACTIVATE | Native.SWP_NOOWNERZORDER | (vis ? Native.SWP_SHOWWINDOW : 0u));
+            if (!vis && Native.IsWindowVisible(Hwnd)) Native.ShowWindow(Hwnd, Native.SW_HIDE);
             Invalidate();
         }
 
@@ -230,9 +316,10 @@ namespace NeuTaskBar
             if (Hwnd == IntPtr.Zero) return;
             if (show)
             {
-                Native.SetWindowPos(Hwnd, Native.HWND_TOPMOST, 0, 0, 0, 0,
-                    Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
                 shown = true;
+                if (!FullyHidden)
+                    Native.SetWindowPos(Hwnd, Native.HWND_TOPMOST, 0, 0, 0, 0,
+                        Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
             }
             else
             {
@@ -243,7 +330,7 @@ namespace NeuTaskBar
 
         public void RaiseTopmost()
         {
-            if (Hwnd == IntPtr.Zero || !shown) return;
+            if (Hwnd == IntPtr.Zero || !shown || FullyHidden) return;
             Native.SetWindowPos(Hwnd, Native.HWND_TOPMOST, 0, 0, 0, 0,
                 Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
         }
@@ -274,7 +361,7 @@ namespace NeuTaskBar
                 }
                 RECT all = new RECT(0, 0, w, h);
                 Gdi.FillRectColor(memDc, all, 0);
-                Native.SetViewportOrgEx(memDc, ovL, 0, IntPtr.Zero);
+                Native.SetViewportOrgEx(memDc, ovL, ovT, IntPtr.Zero);
                 OnPaintContent(memDc);
                 Native.SetViewportOrgEx(memDc, 0, 0, IntPtr.Zero);
                 Native.BitBlt(dc, 0, 0, w, h, memDc, 0, 0, 0x00CC0020);

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -217,7 +217,7 @@ namespace NeuTaskBar
 
         public AppearancePage() : base("Apariencia", "Personaliza cómo se ven las islas de la barra de tareas.")
         {
-            card.AddRow(new SettingRow("Botones de la barra", "Buscar, Vista de tareas y Widgets siguen lo que actives en Configuración > Personalización > Barra de tareas.", null));
+            card.AddRow(new SettingRow("Ajustes de la barra", "La posición, la alineación, los botones, las etiquetas, el reloj y la ocultación automática siguen lo que elijas en Configuración > Personalización > Barra de tareas.", null));
             Controls.Add(card);
         }
 

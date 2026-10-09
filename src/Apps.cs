@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -169,6 +169,7 @@ namespace NeuTaskBar
         public bool Active;
         public bool Flashing;
         public string Title;            // título de la ventana más reciente
+        public string Label;            // texto junto al icono (solo con "no combinar botones"); null = sin etiqueta
         public string Aumid = "";       // AppUserModelID de la ventana (si lo declara)
         public bool Packaged;           // app empaquetada de la Tienda: icono y arranque salen del paquete, no del exe
 
@@ -559,7 +560,7 @@ namespace NeuTaskBar
                 }
                 it.Windows.Add(f.Hwnd);
                 if (f.Hwnd == fg || f.Hwnd == fgRoot) it.Active = true;
-                if (flashing.Contains(f.Hwnd)) { if (it.Active) flashing.Remove(f.Hwnd); else it.Flashing = true; }
+                if (flashing.Contains(f.Hwnd)) { if (it.Active) flashing.Remove(f.Hwnd); else if (Config.Flashing) it.Flashing = true; }
             }
             flashing.RemoveWhere(h => !Native.IsWindow(h));
             aumidCache = newAumids;

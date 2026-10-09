@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
@@ -42,7 +42,8 @@ namespace NeuTaskBar
         public Action<IntPtr> OnActivate, OnClose;
         public int Dpi = 96;
         public RECT Monitor;
-        public int AnchorY;     // y de pantalla de la parte superior de las islas
+        public Edge Edge = Edge.Bottom;
+        public int Anchor;      // coordenada de pantalla del lado de las islas que mira al centro de la pantalla
 
         IntPtr hwnd;
         AppItem current, pending;
@@ -211,13 +212,32 @@ namespace NeuTaskBar
                 c.Close = new RECT(cx + cardW - inner - cs, cy + inner + (headerH - cs) / 2, cx + cardW - inner, cy + inner + (headerH - cs) / 2 + cs);
             }
 
-            int centerX = (cellRect.Left + cellRect.Right) / 2;
-            baseX = Math.Max(Monitor.Left + S(10), Math.Min(centerX - w / 2, Monitor.Right - w - S(10)));
-            baseY = AnchorY - S(8) - h;
+            int centerX = (cellRect.Left + cellRect.Right) / 2, centerY = (cellRect.Top + cellRect.Bottom) / 2;
+            int minX = Monitor.Left + S(10), maxX = Math.Max(minX, Monitor.Right - w - S(10));
+            int minY = Monitor.Top + S(10), maxY = Math.Max(minY, Monitor.Bottom - h - S(10));
+            switch (Edge)
+            {
+                case Edge.Top:
+                    baseX = Math.Max(minX, Math.Min(centerX - w / 2, maxX));
+                    baseY = Anchor + S(8);
+                    break;
+                case Edge.Left:
+                    baseX = Math.Min(Anchor + S(8), maxX);
+                    baseY = Math.Max(minY, Math.Min(centerY - h / 2, maxY));
+                    break;
+                case Edge.Right:
+                    baseX = Math.Max(minX, Anchor - S(8) - w);
+                    baseY = Math.Max(minY, Math.Min(centerY - h / 2, maxY));
+                    break;
+                default:
+                    baseX = Math.Max(minX, Math.Min(centerX - w / 2, maxX));
+                    baseY = Anchor - S(8) - h;
+                    break;
+            }
 
             bool was = visible;
-            int y = was ? baseY + (int)slide.V : baseY + S(12);
-            Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, baseX, y, w, h,
+            int off = was ? (int)slide.V : S(12);
+            Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, baseX + SlideDx * off, baseY + SlideDy * off, w, h,
                 Native.SWP_NOACTIVATE | Native.SWP_NOOWNERZORDER | Native.SWP_SHOWWINDOW);
             visible = true;
             RegisterThumbs();
@@ -229,6 +249,10 @@ namespace NeuTaskBar
             }
             Invalidate();
         }
+
+        // Dirección en la que se desliza el panel al aparecer: desde el borde de pantalla hacia su posición.
+        int SlideDx { get { return Edge == Edge.Left ? -1 : Edge == Edge.Right ? 1 : 0; } }
+        int SlideDy { get { return Edge == Edge.Top ? -1 : Edge == Edge.Bottom ? 1 : 0; } }
 
         void RegisterThumbs()
         {
@@ -358,7 +382,8 @@ namespace NeuTaskBar
                         lastTick = now;
                         if (dt > 0.1f) dt = 0.1f;
                         bool more = slide.Step(dt, 22f, 0.5f);
-                        Native.SetWindowPos(hwnd, IntPtr.Zero, baseX, baseY + (int)Math.Round(slide.V), 0, 0,
+                        int off = (int)Math.Round(slide.V);
+                        Native.SetWindowPos(hwnd, IntPtr.Zero, baseX + SlideDx * off, baseY + SlideDy * off, 0, 0,
                             Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
                         if (!more) { Native.KillTimer(hwnd, new UIntPtr(T_ANIM)); animating = false; }
                         break;

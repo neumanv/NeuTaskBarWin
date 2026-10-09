@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net.NetworkInformation;
@@ -12,7 +12,7 @@ namespace NeuTaskBar
         public const uint WM_APP_APPBAR = Native.WM_APP + 1, WM_APP_TRAY = Native.WM_APP + 2, WM_APP_RESUME = Native.WM_APP + 3,
             WM_APP_QUIT = Native.WM_APP + 4, WM_APP_VOLUME = Native.WM_APP + 6, WM_APP_NET = Native.WM_APP + 7;
 
-        const uint T_REFRESH = 1, T_CLOCK = 2, T_SETUP = 3, T_NET = 4, T_TRIM = 5, T_ENTER = 6, T_FLY = 7, T_TOOLS = 8;
+        const uint T_REFRESH = 1, T_CLOCK = 2, T_SETUP = 3, T_NET = 4, T_TRIM = 5, T_ENTER = 6, T_FLY = 7, T_TOOLS = 8, T_HIDE = 9;
 
         static readonly WndProcDelegate HostProcDelegate = StaticHostProc;
         static App instance;
@@ -41,6 +41,17 @@ namespace NeuTaskBar
         IntPtr desktopWindow;
         RECT lastBarRect;
         int lastBarHeight = -1;
+        Edge barEdge = Edge.Bottom, lastBarEdge = Edge.Bottom;   // borde elegido en Windows y el último aplicado
+        int lastEdgeCheck, lastPosChanged;
+        bool smallWhenFull;                 // "botones pequeños cuando la barra esté llena" y ahora lo está
+        bool barRevealed = true;            // ocultación automática: la barra está a la vista
+        // true mientras la ocultación automática de la barra original la hemos puesto nosotros (para que no reserve sitio);
+        // false cuando su estado es el que el usuario ha elegido en Configuración y simplemente se sigue.
+        bool autoHideForced;
+        bool userAutoHide;                  // lo que el usuario tiene elegido en "Ocultar automáticamente" (solo vale con la barra abajo)
+        int arrivedBottomTick;              // momento en que la barra de Windows volvió al borde inferior
+        int lastWantedTick, hideDist;
+        RECT monRect;
 
         // ------------------------------------------------------------------ ciclo de vida
 
@@ -123,6 +134,13 @@ namespace NeuTaskBar
                 if (Island.IsWin11) Native.PressKeys(Native.VK_LWIN, 0x4E /* N */);
                 else Native.PressKeys(Native.VK_LWIN, 0x12 /* ALT */, 0x44 /* D */);
             };
+            right.OnKeyboardClick = () =>
+            {
+                string tip = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFiles),
+                    @"microsoft shared\ink\TabTip.exe");
+                Native.Launch(tip, null);
+            };
+            right.OnDesktopClick = () => Native.PressKeys(Native.VK_LWIN, 0x44 /* D */);
             right.OnVolumeWheel = delta => { volume.Step(delta > 0); right.Refresh(); };
             right.OnSysContext = SysContext;
             right.OnClockContext = ClockContext;
@@ -143,7 +161,8 @@ namespace NeuTaskBar
 
         void ApplyTools()
         {
-            Config.ReadWindowsTaskbarButtons();
+            Config.ReadWindowsTaskbarSettings();
+            left.SearchMode = Config.SearchMode;
             var ids = new List<string>();
             if (Config.ShowSearch) ids.Add("search");
             if (Config.ShowTaskView) ids.Add("taskview");
@@ -151,12 +170,81 @@ namespace NeuTaskBar
             left.SetTools(ids.ToArray());
         }
 
+        // Algo cambió en Configuración > Personalización > Barra de tareas: se aplica al momento.
+        void ApplyWindowsSettings()
+        {
+            ApplyTools();
+            RemoveHooks();
+            InstallHooks();
+            right.UpdateClock();
+            Native.SetTimer(host, new UIntPtr(T_CLOCK), 200, IntPtr.Zero);
+            flyout.HideNow();
+            lastBarHeight = -1;
+            lastSig = "";
+            ApplyLayout();
+            UpdateAutoHide();
+        }
+
+        // Ocultación automática: arranca o detiene la vigilancia del cursor.
+        void UpdateAutoHide()
+        {
+            if (Config.AutoHide && !paused)
+            {
+                lastWantedTick = Environment.TickCount;
+                Native.SetTimer(host, new UIntPtr(T_HIDE), 100, IntPtr.Zero);
+            }
+            else
+            {
+                Native.KillTimer(host, new UIntPtr(T_HIDE));
+                barRevealed = true;
+                left.SetAutoHidden(false, hideDist);
+                right.SetAutoHidden(false, hideDist);
+            }
+        }
+
+        // La barra aparece al llevar el cursor a su borde de pantalla (o al abrir Inicio, un panel o un menú)
+        // y se esconde poco después de que el cursor la abandone, como la barra de Windows.
+        void AutoHideTick()
+        {
+            if (paused || !Config.AutoHide) { UpdateAutoHide(); return; }
+            POINT p;
+            Native.GetCursorPos(out p);
+            RECT rc = monRect;
+            bool inside = p.X >= rc.Left && p.X < rc.Right && p.Y >= rc.Top && p.Y < rc.Bottom;
+            int near = left.S(2), zone = hideDist;
+            int d = barEdge == Edge.Bottom ? rc.Bottom - 1 - p.Y : barEdge == Edge.Top ? p.Y - rc.Top
+                  : barEdge == Edge.Left ? p.X - rc.Left : rc.Right - 1 - p.X;
+            bool atEdge = inside && d <= near;
+            bool overBar = inside && d <= zone;
+            bool busy = menu.Visible || flyout.Visible || IsFlyoutOpen(FlyKind.Start) || IsFlyoutOpen(FlyKind.Shell) || IsFlyoutOpen(FlyKind.Overflow);
+            int now = Environment.TickCount;
+            if (atEdge || busy || (barRevealed && overBar))
+            {
+                lastWantedTick = now;
+                if (!barRevealed)
+                {
+                    barRevealed = true;
+                    left.SetAutoHidden(false, hideDist);
+                    right.SetAutoHidden(false, hideDist);
+                    left.RaiseTopmost();
+                    right.RaiseTopmost();
+                }
+            }
+            else if (barRevealed && (now - lastWantedTick > 450 || now < lastWantedTick))
+            {
+                barRevealed = false;
+                flyout.HideNow();
+                left.SetAutoHidden(true, hideDist);
+                right.SetAutoHidden(true, hideDist);
+            }
+        }
+
         void Resume()
         {
             paused = false;
             started = true;
             Native.SetTimer(host, new UIntPtr(T_CLOCK), 1000, IntPtr.Zero);
-            Native.SetTimer(host, new UIntPtr(T_TOOLS), 1500, IntPtr.Zero);
+            Native.SetTimer(host, new UIntPtr(T_TOOLS), 700, IntPtr.Zero);
 
             volume.Attach();
             right.UpdateNetwork(NetworkProbe.Detect());
@@ -172,12 +260,19 @@ namespace NeuTaskBar
             left.Show(!islandsHiddenForFullscreen);
             right.Show(!islandsHiddenForFullscreen);
             UpdateTrayTip();
+            UpdateAutoHide();
             Native.SetTimer(host, new UIntPtr(T_TRIM), 8000, IntPtr.Zero);
         }
 
         bool SetupShell()
         {
             if (!ShellTaskbar.Hide()) return false;
+            barEdge = Config.ReadTaskbarEdge();
+            // Lo que el usuario tenía elegido en Windows antes de sustituir la barra. Si no la tenía en ocultación
+            // automática, Hide() la ha puesto en ese modo solo para que no reserve su franja.
+            userAutoHide = ShellTaskbar.OriginalAutoHide();
+            Config.AutoHide = userAutoHide && barEdge == Edge.Bottom;
+            autoHideForced = !userAutoHide;
             ShellTaskbar.RegisterBar(host, WM_APP_APPBAR);
             lastBarHeight = -1;
             ApplyLayout();
@@ -187,6 +282,7 @@ namespace NeuTaskBar
         void Pause()
         {
             paused = true;
+            Native.KillTimer(host, new UIntPtr(T_HIDE));
             Native.KillTimer(host, new UIntPtr(T_REFRESH));
             Native.KillTimer(host, new UIntPtr(T_SETUP));
             Native.KillTimer(host, new UIntPtr(T_NET));
@@ -254,7 +350,13 @@ namespace NeuTaskBar
             {
                 case Native.WM_TIMER: OnTimer((uint)w.ToInt64()); return IntPtr.Zero;
                 case WM_APP_APPBAR:
-                    if (w.ToInt64() == Native.ABN_POSCHANGED && !paused) ApplyLayout();
+                    if (w.ToInt64() == Native.ABN_POSCHANGED && !paused)
+                    {
+                        // Otra barra cambió: se vuelve a fijar nuestra franja (con un mínimo entre veces, para no entrar en bucle).
+                        int tick = Environment.TickCount;
+                        if (tick - lastPosChanged > 300 || tick < lastPosChanged) { lastPosChanged = tick; lastBarHeight = -1; }
+                        ApplyLayout();
+                    }
                     return IntPtr.Zero;
                 case WM_APP_TRAY: OnTrayMessage((uint)(l.ToInt64() & 0xFFFF)); return IntPtr.Zero;
                 case WM_APP_RESUME: if (paused) Resume(); return IntPtr.Zero;
@@ -297,14 +399,19 @@ namespace NeuTaskBar
                     break;
                 case T_TOOLS:
                     if (paused) { Native.KillTimer(host, new UIntPtr(T_TOOLS)); break; }
-                    if (Config.ReadWindowsTaskbarButtons()) { ApplyTools(); lastBarHeight = -1; ApplyLayout(); }
+                    if (Config.ReadWindowsTaskbarSettings()) ApplyWindowsSettings();
+                    CheckTaskbarEdge();
+                    break;
+                case T_HIDE:
+                    AutoHideTick();
                     break;
                 case T_CLOCK:
                     if (paused) { Native.KillTimer(host, new UIntPtr(T_CLOCK)); break; }
                     right.UpdateClock();
                     right.UpdateBattery(BatteryState.Read());
                     var now = DateTime.Now;
-                    uint next = (uint)((60 - now.Second) * 1000 - now.Millisecond + 150);
+                    uint next = Config.ClockSeconds ? (uint)(1000 - now.Millisecond + 20)
+                        : (uint)((60 - now.Second) * 1000 - now.Millisecond + 150);
                     Native.SetTimer(host, new UIntPtr(T_CLOCK), next, IntPtr.Zero);
                     break;
                 case T_SETUP:
@@ -394,13 +501,25 @@ namespace NeuTaskBar
             toggleClose = false;
             if (IsFlyoutOpen(kind))
             {
-                if (kind == FlyKind.Overflow) Native.PressKeys(0x1B /* ESC */);
+                if (kind == FlyKind.Overflow) CloseOverflowFlyout();
                 else if (kind == FlyKind.Start) Native.PressKeys(Native.VK_LWIN);
                 else if (shellOwner == 1) Native.PressKeys(Native.VK_LWIN, 0x41);
                 else if (Island.IsWin11) Native.PressKeys(Native.VK_LWIN, 0x4E);
                 else Native.PressKeys(Native.VK_LWIN, 0x12, 0x44);
             }
             return true;
+        }
+
+        // El ESC solo llega si el panel tiene el foco (tras pulsar nuestra isla no lo tiene): se le da el foco primero
+        // y, si aun así sigue visible, se oculta directamente.
+        static void CloseOverflowFlyout()
+        {
+            IntPtr o = Native.FindWindowW(OverflowClass, null);
+            if (o == IntPtr.Zero) return;
+            Activate(o);
+            Native.PressKeys(0x1B /* ESC */);
+            System.Threading.Thread.Sleep(80);
+            if (Native.IsWindowVisible(o)) Native.ShowWindow(o, Native.SW_HIDE);
         }
 
         static bool OverflowFlyoutOpen()
@@ -418,9 +537,16 @@ namespace NeuTaskBar
             RECT r, isl;
             Native.GetWindowRect(o, out r);
             Native.GetWindowRect(right.Hwnd, out isl);
-            int limit = isl.Top - right.S(8);
-            if (r.Bottom > limit + 1)
-                Native.SetWindowPos(o, IntPtr.Zero, r.Left, r.Top - (r.Bottom - limit), 0, 0,
+            int gap = right.S(8), nx = r.Left, ny = r.Top;
+            switch (right.Edge)
+            {
+                case Edge.Top: if (r.Top < isl.Bottom + gap - 1) ny = isl.Bottom + gap; break;
+                case Edge.Left: if (r.Left < isl.Right + gap - 1) nx = isl.Right + gap; break;
+                case Edge.Right: if (r.Right > isl.Left - gap + 1) nx = isl.Left - gap - r.Width; break;
+                default: if (r.Bottom > isl.Top - gap + 1) ny = isl.Top - gap - r.Height; break;
+            }
+            if (nx != r.Left || ny != r.Top)
+                Native.SetWindowPos(o, IntPtr.Zero, nx, ny, 0, 0,
                     Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
         }
 
@@ -452,7 +578,12 @@ namespace NeuTaskBar
             hooks.Add(Native.SetWinEventHook(Native.EVENT_SYSTEM_MINIMIZESTART, Native.EVENT_SYSTEM_MINIMIZEEND, IntPtr.Zero, winEventProc, 0, 0, flags));
             hooks.Add(Native.SetWinEventHook(Native.EVENT_OBJECT_CREATE, Native.EVENT_OBJECT_HIDE, IntPtr.Zero, winEventProc, 0, 0, flags));
             hooks.Add(Native.SetWinEventHook(Native.EVENT_OBJECT_CLOAKED, Native.EVENT_OBJECT_UNCLOAKED, IntPtr.Zero, winEventProc, 0, 0, flags));
+            // Con etiquetas en los botones hay que enterarse de los cambios de título de las ventanas.
+            if (Config.Combine != 0)
+                hooks.Add(Native.SetWinEventHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE, IntPtr.Zero, winEventProc, 0, 0, flags));
         }
+
+        const uint EVENT_OBJECT_NAMECHANGE = 0x800C;
 
         void RemoveHooks()
         {
@@ -464,7 +595,7 @@ namespace NeuTaskBar
         void OnWinEvent(IntPtr hook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
         {
             if (idObject != Native.OBJID_WINDOW || idChild != 0 || hwnd == IntPtr.Zero) return;
-            if (evt >= Native.EVENT_OBJECT_CREATE && evt <= Native.EVENT_OBJECT_HIDE)
+            if ((evt >= Native.EVENT_OBJECT_CREATE && evt <= Native.EVENT_OBJECT_HIDE) || evt == EVENT_OBJECT_NAMECHANGE)
             {
                 // Solo ventanas de nivel superior (las hijas generan muchísimo ruido).
                 if (Native.GetAncestor(hwnd, 1 /* GA_PARENT */) != desktopWindow) return;
@@ -498,30 +629,128 @@ namespace NeuTaskBar
             int dpi = Native.GetMonitorDpi(mon);
             left.Dpi = right.Dpi = dpi;
             int h = left.S(Config.Height);
-            if (left.Icons.SetPx(left.S(Config.IconSize))) lastSig = "";
+            // Botones más pequeños (siempre, o solo cuando la barra está llena): iconos a 2/3 de su tamaño, como en Windows.
+            bool small = Config.SmallButtons == 0 || (Config.SmallButtons == 2 && smallWhenFull);
+            left.Small = small;
+            if (left.Icons.SetPx(left.S(small ? Math.Max(16, Config.IconSize * 2 / 3) : Config.IconSize))) lastSig = "";
             int margin = left.S(Config.Margin);
-            int bottom = rc.Bottom - margin;
+            Edge edge = barEdge;
+            bool vert = edge == Edge.Left || edge == Edge.Right;
+            // Coordenada del lado de las islas pegado al borde de pantalla, y la del lado que mira al centro.
+            int cross, anchor;
+            switch (edge)
+            {
+                case Edge.Top: cross = rc.Top + margin; anchor = cross + h; break;
+                case Edge.Left: cross = rc.Left + margin; anchor = cross + h; break;
+                case Edge.Right: cross = rc.Right - margin; anchor = cross - h; break;
+                default: cross = rc.Bottom - margin; anchor = cross - h; break;
+            }
             flyout.Dpi = dpi;
             menu.Dpi = dpi;
             menu.Monitor = rc;
             flyout.Monitor = rc;
-            flyout.AnchorY = bottom - h;
+            menu.Edge = flyout.Edge = edge;
+            flyout.Anchor = anchor;
 
-            right.SetAnchor(rc.Right - margin, bottom);
+            // La isla izquierda arranca al principio de la barra (izquierda/arriba) y la derecha termina al final (derecha/abajo).
+            right.SetPlacement(edge, cross, vert ? rc.Bottom - margin : rc.Right - margin);
             right.Layout();
-            left.MaxWidth = rc.Width - right.VisW - margin * 3 - left.S(24);
-            left.SetAnchor(rc.Left + margin, bottom);
+            left.MaxWidth = (vert ? rc.Height : rc.Width) - right.VisW - margin * 3 - left.S(24);
+            // Alineación de la barra: al centro de la pantalla (sin pisar la isla derecha) o al inicio.
+            int a0 = vert ? rc.Top : rc.Left, a1 = vert ? rc.Bottom : rc.Right;
+            left.Centered = Config.Center;
+            left.CenterPos = (a0 + a1) / 2;
+            left.CenterMin = a0 + margin;
+            left.CenterMax = a1 - margin - right.VisW - left.S(12);
+            left.SetPlacement(edge, cross, vert ? rc.Top + margin : rc.Left + margin);
             left.Layout();
 
+            monRect = rc;
+            hideDist = h + margin + left.S(14);
             int reserved = h + margin;
-            if (reserved != lastBarHeight || rc.Left != lastBarRect.Left || rc.Bottom != lastBarRect.Bottom || rc.Right != lastBarRect.Right)
+            if (Config.AutoHide)
+            {
+                // Con ocultación automática la barra no reserva sitio: las ventanas ocupan toda la pantalla.
+                if (ShellTaskbar.BarRegistered) ShellTaskbar.UnregisterBar(host);
+                lastBarHeight = -1;
+            }
+            else if (!ShellTaskbar.BarRegistered && ShellTaskbar.IsHiddenByUs())
+            {
+                ShellTaskbar.RegisterBar(host, WM_APP_APPBAR);
+                lastBarHeight = -1;
+            }
+            if (!Config.AutoHide && (reserved != lastBarHeight || edge != lastBarEdge || rc.Left != lastBarRect.Left || rc.Top != lastBarRect.Top
+                || rc.Bottom != lastBarRect.Bottom || rc.Right != lastBarRect.Right))
             {
                 lastBarHeight = reserved;
+                lastBarEdge = edge;
                 lastBarRect = rc;
-                ShellTaskbar.SetBarPos(host, rc, reserved);
+                ShellTaskbar.SetBarPos(host, rc, reserved, edge);
             }
             // Si cambió el tamaño de icono se vació la caché: reconstruye las imágenes antes de volver a pintar.
             if (lastSig.Length == 0 && started && !paused) RefreshApps();
+        }
+
+        // "Ocultar automáticamente la barra de tareas": Configuración cambia el estado real de la barra original, y eso
+        // es lo que se sigue. Hay que separar lo que elige el usuario de lo que ponemos nosotros (al sustituir la barra se
+        // deja en ocultación automática para que no reserve su franja) y de lo que hace Windows por su cuenta: fuera del
+        // borde inferior desactiva la ocultación, y al volver abajo repone la que había al salir.
+        // Devuelve true si hay que recolocar las islas.
+        bool FollowAutoHide(Edge edge, bool edgeChanged)
+        {
+            if (!ShellTaskbar.IsHiddenByUs()) return false;
+            bool? liveState = ShellTaskbar.LiveAutoHide();
+            if (liveState == null) return false;
+            bool live = liveState.Value, relayout = false, wasForced = autoHideForced;
+            if (ShellTaskbar.IsTrayVisible()) { ShellTaskbar.HideWindow(); relayout = true; }
+
+            int now = Environment.TickCount;
+            if (edge != Edge.Bottom)
+            {
+                autoHideForced = false;     // aquí Windows no admite la ocultación automática: nada que forzar ni que seguir
+            }
+            else
+            {
+                if (edgeChanged) arrivedBottomTick = now;
+                bool arriving = edgeChanged || (now - arrivedBottomTick < 2500 && now >= arrivedBottomTick);
+                if (arriving)
+                {
+                    // Recién llegada abajo: si Windows la deja en ocultación y el usuario no la quería, es la nuestra.
+                    autoHideForced = live && !userAutoHide;
+                }
+                else if (autoHideForced)
+                {
+                    // El usuario la ha desmarcado en Configuración (donde se veía marcada): sigue sin quererla.
+                    if (!live) autoHideForced = false;
+                }
+                else if (live != userAutoHide)
+                {
+                    // El usuario la ha cambiado en Configuración.
+                    userAutoHide = live;
+                    ShellTaskbar.SetOriginalAutoHide(live);
+                }
+            }
+
+            bool effective = edge == Edge.Bottom && userAutoHide;
+            if (effective != Config.AutoHide) { Config.AutoHide = effective; relayout = true; }
+            return relayout || wasForced != autoHideForced;
+        }
+
+        // Si el usuario mueve la barra de Windows a otro borde o cambia su ocultación automática, las islas lo siguen.
+        void CheckTaskbarEdge()
+        {
+            int now = Environment.TickCount;
+            if (now - lastEdgeCheck < 500 && now >= lastEdgeCheck) return;
+            lastEdgeCheck = now;
+            Edge e = Config.ReadTaskbarEdge();
+            bool edgeChanged = e != barEdge;
+            bool hideChanged = FollowAutoHide(e, edgeChanged);
+            if (!edgeChanged && !hideChanged) return;
+            barEdge = e;
+            if (edgeChanged) { flyout.HideNow(); menu.Close(); lastSig = ""; }
+            lastBarHeight = -1;
+            ApplyLayout();
+            UpdateAutoHide();
         }
 
         void RefreshApps()
@@ -529,7 +758,8 @@ namespace NeuTaskBar
             if (paused || !started) return;
 
             UpdateFlyoutStates();
-            if (ShellTaskbar.IsHiddenByUs() && ShellTaskbar.IsTrayVisible()) ShellTaskbar.Hide();
+            if (ShellTaskbar.IsHiddenByUs() && ShellTaskbar.IsTrayVisible()) ShellTaskbar.HideWindow();
+            CheckTaskbarEdge();
 
             bool full = IsForegroundFullscreen();
             if (full != islandsHiddenForFullscreen)
@@ -547,10 +777,59 @@ namespace NeuTaskBar
 
             string sig;
             var list = tracker.Snapshot(out sig);
+            list = Uncombine(list, ref sig);
             flyout.UpdateItems(list);
             if (sig == lastSig) return;
             lastSig = sig;
             left.SetItems(list);
+
+            // "Botones más pequeños: cuando la barra esté llena".
+            bool barFull = Config.SmallButtons == 2 && left.FullAtNormalSize;
+            if (barFull != smallWhenFull)
+            {
+                smallWhenFull = barFull;
+                lastSig = "";
+                ApplyLayout();
+            }
+        }
+
+        // "Combinar botones y ocultar etiquetas": nunca (2) o solo con la barra llena (1). Cada ventana pasa a tener
+        // su propio botón con el título como etiqueta; las apps fijadas sin abrir siguen siendo un icono.
+        List<AppItem> Uncombine(List<AppItem> list, ref string sig)
+        {
+            if (Config.Combine == 0) return list;
+            IntPtr fg = Native.GetForegroundWindow();
+            IntPtr fgRoot = fg == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(fg, Native.GA_ROOTOWNER);
+            var result = new List<AppItem>();
+            var sb = new System.Text.StringBuilder(sig);
+            int labeled = 0, plain = 0;
+            foreach (var it in list)
+            {
+                if (it.Windows.Count == 0) { result.Add(it); plain++; continue; }
+                var wins = new List<IntPtr>(it.Windows);
+                wins.Sort((a, b) => a.ToInt64().CompareTo(b.ToInt64()));   // orden estable (el de la lista cambia con el foco)
+                for (int i = 0; i < wins.Count; i++)
+                {
+                    IntPtr w = wins[i];
+                    string title = Native.GetWindowText(w);
+                    if (string.IsNullOrEmpty(title)) title = it.Name ?? "";
+                    var c = new AppItem
+                    {
+                        Key = it.Key, Name = it.Name, LaunchPath = it.LaunchPath, ExePath = it.ExePath, Pinned = it.Pinned,
+                        Id = i == 0 ? it.Id : it.Id + "#" + w.ToInt64(), Image = it.Image, Title = title, Label = title,
+                        Aumid = it.Aumid, Packaged = it.Packaged
+                    };
+                    c.Windows.Add(w);
+                    c.Active = it.Active && (wins.Count == 1 || w == fg || w == fgRoot);
+                    c.Flashing = it.Flashing && !c.Active;
+                    result.Add(c);
+                    labeled++;
+                    sb.Append('#').Append(w.ToInt64()).Append(c.Active ? 'A' : '-').Append(title).Append(';');
+                }
+            }
+            if (Config.Combine == 1 && !left.FitsUncombined(labeled, plain)) { sig += "|combined"; return list; }
+            sig = sb.ToString();
+            return result;
         }
 
         bool IsForegroundFullscreen()
@@ -558,6 +837,8 @@ namespace NeuTaskBar
             IntPtr fg = Native.GetForegroundWindow();
             if (fg == IntPtr.Zero || fg == host || fg == left.Hwnd || fg == right.Hwnd) return false;
             if (!Native.IsWindowVisible(fg) || Native.IsIconic(fg)) return false;
+            // Con ocultación automática una ventana maximizada ocupa toda la pantalla sin ser de pantalla completa.
+            if (Config.AutoHide && Native.IsZoomed(fg)) return false;
             string cls = Native.GetClassName(fg);
             if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") return false;
             IntPtr mon = Native.MonitorFromWindow(fg, 2 /* NEAREST */);
@@ -618,8 +899,8 @@ namespace NeuTaskBar
             var runKeys = new List<string>();
             foreach (var it in ordered)
             {
-                if (it.Pinned) pinnedPaths.Add(it.LaunchPath);
-                else runKeys.Add(it.Key);
+                if (it.Pinned) { if (!pinnedPaths.Contains(it.LaunchPath)) pinnedPaths.Add(it.LaunchPath); }
+                else if (!runKeys.Contains(it.Key)) runKeys.Add(it.Key);
             }
             pins.ReorderByPaths(pinnedPaths);
             tracker.SetRunOrder(runKeys);
@@ -646,10 +927,10 @@ namespace NeuTaskBar
         // ------------------------------------------------------------------ menús
         // Menú de la barra con el aspecto y las medidas del de Windows 11 (TaskbarMenu); el del icono de bandeja es nativo.
 
-        void OpenMenu(List<MenuDef> defs, int centerX)
+        void OpenMenu(List<MenuDef> defs, int x, int y)
         {
             flyout.HideNow();
-            menu.Show(defs, centerX, flyout.AnchorY);
+            menu.Show(defs, x, y, flyout.Anchor);
         }
 
         static void Open(string target, string args, string dir)
@@ -665,11 +946,11 @@ namespace NeuTaskBar
             l.Add(MenuDef.Item("Administrador de tareas", () => Native.Launch("taskmgr.exe", null),
                 left.Icons.Get(Environment.GetFolderPath(Environment.SpecialFolder.System) + "\\Taskmgr.exe")));
             l.Add(MenuDef.Item("Configuración de la barra de tareas", () => Native.Launch("ms-settings:taskbar", null), "\uE713"));
-            OpenMenu(l, x);
+            OpenMenu(l, x, y);
         }
 
         // Botón de una app: lista de salto de Windows (tareas y categorías), nombre de la app, anclar/desanclar y cerrar.
-        void ItemContext(AppItem it, int centerX, int top)
+        void ItemContext(AppItem it, int x, int y)
         {
             var l = new List<MenuDef>();
             int iconPx = left.S(16) * 2;
@@ -702,19 +983,31 @@ namespace NeuTaskBar
                     else pins.Add(it.ExePath, null);
                     lastSig = ""; RefreshApps();
                 }, "\uE718"));
+            if (it.Running && Config.EndTask)
+                l.Add(MenuDef.Item("Finalizar tarea", () =>
+                {
+                    var done = new HashSet<uint>();
+                    foreach (var w in it.Windows.ToArray())
+                    {
+                        uint pid;
+                        Native.GetWindowThreadProcessId(w, out pid);
+                        if (pid == 0 || !done.Add(pid)) continue;
+                        try { System.Diagnostics.Process.GetProcessById((int)pid).Kill(); } catch { }
+                    }
+                }, "\uE8BB"));
             if (it.Running)
                 l.Add(MenuDef.Item(it.Windows.Count > 1 ? "Cerrar todas las ventanas" : "Cerrar ventana", () =>
                 {
                     foreach (var w in it.Windows.ToArray()) Native.PostMessageW(w, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
                 }, "\uE711"));
-            OpenMenu(l, centerX);
+            OpenMenu(l, x, y);
         }
 
         void ClockContext(int x, int y)
         {
             var l = new List<MenuDef>();
             l.Add(MenuDef.Item("Ajustar fecha y hora", () => Native.Launch("ms-settings:dateandtime", null), (string)null));
-            OpenMenu(l, x);
+            OpenMenu(l, x, y);
         }
 
         // Iconos de sistema: menú del icono bajo el cursor (red, volumen o batería).
@@ -729,7 +1022,7 @@ namespace NeuTaskBar
                 l.Add(MenuDef.Item("Configuración de sonido", () => Native.Launch("ms-settings:sound", null), (string)null));
             }
             else l.Add(MenuDef.Item("Configuración de energía y batería", () => Native.Launch("ms-settings:powersleep", null), (string)null));
-            OpenMenu(l, x);
+            OpenMenu(l, x, y);
         }
 
         // ---- Menú del icono de NeuTaskBar en la bandeja de Windows (nativo) ----

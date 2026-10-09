@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
@@ -53,6 +53,7 @@ namespace NeuTaskBar
 
         public int Dpi = 96;
         public RECT Monitor;
+        public Edge Edge = Edge.Bottom;
 
         IntPtr hwnd;
         List<MenuDef> items = new List<MenuDef>();
@@ -101,8 +102,9 @@ namespace NeuTaskBar
 
         // ------------------------------------------------------------------ mostrar / cerrar
 
-        // centerX: centro horizontal sobre el que se centra el menú; anchorTop: borde superior de las islas.
-        public void Show(List<MenuDef> defs, int centerX, int anchorTop)
+        // pointX/pointY: punto de pantalla sobre el que se centra el menú (a lo largo de la barra);
+        // anchor: lado de las islas que mira al centro de la pantalla.
+        public void Show(List<MenuDef> defs, int pointX, int pointY, int anchor)
         {
             Close();
             items = defs;
@@ -129,17 +131,40 @@ namespace NeuTaskBar
             }
             h = y + padY;
 
-            baseX = Math.Max(Monitor.Left + S(12), Math.Min(centerX - w / 2, Monitor.Right - w - S(12)));
-            baseY = anchorTop - S(12) - h;
+            int minX = Monitor.Left + S(12), maxX = Math.Max(minX, Monitor.Right - w - S(12));
+            int minY = Monitor.Top + S(12), maxY = Math.Max(minY, Monitor.Bottom - h - S(12));
+            switch (Edge)
+            {
+                case Edge.Top:
+                    baseX = Math.Max(minX, Math.Min(pointX - w / 2, maxX));
+                    baseY = anchor + S(12);
+                    break;
+                case Edge.Left:
+                    baseX = Math.Min(anchor + S(12), maxX);
+                    baseY = Math.Max(minY, Math.Min(pointY - h / 2, maxY));
+                    break;
+                case Edge.Right:
+                    baseX = Math.Max(minX, anchor - S(12) - w);
+                    baseY = Math.Max(minY, Math.Min(pointY - h / 2, maxY));
+                    break;
+                default:
+                    baseX = Math.Max(minX, Math.Min(pointX - w / 2, maxX));
+                    baseY = anchor - S(12) - h;
+                    break;
+            }
             hover = -1;
             slide = new Ease(S(12));
             slide.T = 0;
-            Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, baseX, baseY + S(12), w, h, Native.SWP_NOOWNERZORDER | Native.SWP_SHOWWINDOW);
+            Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, baseX + SlideDx * S(12), baseY + SlideDy * S(12), w, h, Native.SWP_NOOWNERZORDER | Native.SWP_SHOWWINDOW);
             visible = true;
             Native.SetForegroundWindow(hwnd);
             StartAnim();
             Native.InvalidateRect(hwnd, IntPtr.Zero, false);
         }
+
+        // Dirección en la que se desliza el menú al aparecer: desde el borde de pantalla hacia su posición.
+        int SlideDx { get { return Edge == Edge.Left ? -1 : Edge == Edge.Right ? 1 : 0; } }
+        int SlideDy { get { return Edge == Edge.Top ? -1 : Edge == Edge.Bottom ? 1 : 0; } }
 
         public void Close()
         {
@@ -224,7 +249,8 @@ namespace NeuTaskBar
                         lastTick = now;
                         if (dt > 0.1f) dt = 0.1f;
                         bool more = slide.Step(dt, 22f, 0.5f);
-                        Native.SetWindowPos(hwnd, IntPtr.Zero, baseX, baseY + (int)Math.Round(slide.V), 0, 0,
+                        int off = (int)Math.Round(slide.V);
+                        Native.SetWindowPos(hwnd, IntPtr.Zero, baseX + SlideDx * off, baseY + SlideDy * off, 0, 0,
                             Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
                         if (!more) { Native.KillTimer(hwnd, new UIntPtr(T_ANIM)); animating = false; }
                         return IntPtr.Zero;
