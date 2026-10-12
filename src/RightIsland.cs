@@ -29,6 +29,8 @@ namespace NeuTaskBar
         string timeFormat = "";
         int hover = None, pressed = None;
         int clockPx;   // tamaño de letra del reloj (se reduce en barras verticales para que quepa)
+        bool clockOneLine;   // barra baja: hora y fecha seguidas en una línea, porque las dos líneas no caben
+        int clockDateW;      // ancho reservado a la fecha en ese caso
         Tip tip;
 
         public RightIsland() : base(true) { }
@@ -42,20 +44,21 @@ namespace NeuTaskBar
 
         string TipText(int idx)
         {
-            if (idx == Chevron) return "Mostrar iconos ocultos";
-            if (idx == Keyboard) return "Teclado táctil";
-            if (idx == Desktop) return "Mostrar escritorio";
+            if (Movable) return "";
+            if (idx == Chevron) return L.T("Mostrar iconos ocultos");
+            if (idx == Keyboard) return L.T("Teclado táctil");
+            if (idx == Desktop) return L.T("Mostrar escritorio");
             if (idx == Sys)
             {
                 var parts = new List<string>();
-                parts.Add(net == NetKind.Wifi ? "Wi-Fi conectado" : net == NetKind.Ethernet ? "Ethernet conectado" : "Sin conexión a Internet");
+                parts.Add(net == NetKind.Wifi ? L.T("Wi-Fi conectado") : net == NetKind.Ethernet ? L.T("Ethernet conectado") : L.T("Sin conexión a Internet"));
                 var vol = Volume != null ? Volume() : null;
-                if (vol != null && vol.Available) parts.Add(vol.Muted ? "Volumen: silenciado" : "Volumen: " + vol.Level + "%");
+                if (vol != null && vol.Available) parts.Add(vol.Muted ? L.T("Volumen: silenciado") : L.T("Volumen: ") + vol.Level + "%");
                 if (battery.Present)
-                    parts.Add("Batería: " + battery.Percent + "%" + (battery.Charging ? " (cargando)" : battery.AcPower ? " (conectada)" : ""));
+                    parts.Add(L.T("Batería: ") + battery.Percent + "%" + (battery.Charging ? L.T(" (cargando)") : battery.AcPower ? L.T(" (conectada)") : ""));
                 return string.Join("\n", parts.ToArray());
             }
-            return DateTime.Now.ToString("dddd, d 'de' MMMM 'de' yyyy", CultureInfo.CurrentCulture);
+            return DateTime.Now.ToString("D", L.Culture);
         }
 
         public void UpdateNetwork(NetKind k) { if (k != net) { net = k; Layout(); } }
@@ -112,9 +115,9 @@ namespace NeuTaskBar
         public override void Layout()
         {
             IntPtr sdc = Native.GetDC(IntPtr.Zero);
-            int h = S(Config.Height);
+            int h = BarH;
             int pad = S(6);
-            int cellH = h - S(8);
+            int cellH = h - Inset * 2;
             int chevW = S(26);
             int sysW = IconSlots * S(26) + S(10);
             bool vert = Vert;
@@ -136,10 +139,13 @@ namespace NeuTaskBar
             var clockFont = Gdi.Font("Segoe UI", clockPx, 400);
             int tw = Math.Max(Gdi.TextWidth(sdc, timeText, clockFont), Gdi.TextWidth(sdc, timeSample, clockFont));
             int dw = Math.Max(Gdi.TextWidth(sdc, DateShown, clockFont), Gdi.TextWidth(sdc, DateSampleShown, clockFont));
+            // Con la barra pequeña de Windows no caben las dos líneas: la fecha pasa a continuación de la hora.
+            clockOneLine = !vert && Gdi.LineHeight(sdc, clockFont) * 2 > cellH + S(2);
+            clockDateW = dw;
             Native.ReleaseDC(IntPtr.Zero, sdc);
 
             // Las partes visibles se colocan una tras otra a lo largo de la isla.
-            int y = S(4), cur = pad;
+            int y = Inset, cur = pad;
             for (int i = 0; i < Count; i++) rects[i] = default(RECT);
             Action<int, int> add = (idx, len) =>
             {
@@ -150,7 +156,7 @@ namespace NeuTaskBar
             if (Config.ShowChevron) add(Chevron, chevW);
             if (Config.TouchKeyboard) add(Keyboard, S(30));
             add(Sys, sysW);
-            if (Config.ShowClock) add(Clock, vert ? S(44) : Math.Max(tw, dw) + S(16));
+            if (Config.ShowClock) add(Clock, vert ? S(44) : (clockOneLine ? tw + S(8) + dw : Math.Max(tw, dw)) + S(16));
             if (Config.ShowDesktopCorner) add(Desktop, S(8));
             VisW = cur + pad;
             VisH = h;
@@ -190,6 +196,8 @@ namespace NeuTaskBar
             if (h != None) hoverE[h].T = 1f;
             StartAnim();
         }
+
+        protected override void HideTip() { if (tip != null) tip.Hide(); }
 
         protected override void OnMouseLeave()
         {
@@ -244,7 +252,7 @@ namespace NeuTaskBar
         protected override void OnPaintContent(IntPtr dc)
         {
             float radius = S(6);
-            IntPtr g = Gfx.Begin(dc);
+            IntPtr g = BeginGfx();
             for (int i = 0; i < Count; i++)
             {
                 float fill = hoverE[i].V * 0.16f * (1f - 0.45f * pressE[i].V);
@@ -254,23 +262,23 @@ namespace NeuTaskBar
                 {
                     // Como en Windows: una línea fina que solo se ve al pasar el ratón por la esquina.
                     float a = Math.Min(1f, hoverE[i].V) * 0.6f;
-                    if (Vert) Gfx.FillRect(g, r.Left + S(4), r.Top, r.Width - S(8), Math.Max(1, S(1)), Gfx.Argb(a, 255, 255, 255));
-                    else Gfx.FillRect(g, r.Left, r.Top + S(4), Math.Max(1, S(1)), r.Height - S(8), Gfx.Argb(a, 255, 255, 255));
+                    if (Vert) Gfx.FillRect(g, r.Left + S(4), r.Top, r.Width - S(8), Math.Max(1, S(1)), Veil(a));
+                    else Gfx.FillRect(g, r.Left, r.Top + S(4), Math.Max(1, S(1)), r.Height - S(8), Veil(a));
                     continue;
                 }
-                Gfx.FillRound(g, r.Left, r.Top, r.Width, r.Height, radius, Gfx.Argb(fill, 255, 255, 255));
+                Gfx.FillRound(g, r.Left, r.Top, r.Width, r.Height, radius, Veil(fill));
             }
             Gfx.End(g);
 
-            int white = Native.Rgb(245, 245, 245), dim = Native.Rgb(120, 120, 120);
+            int white = Ink(245), dim = Ink(120);
             string face = Gdi.IconFace(dc);
 
             // Flecha de iconos ocultos
             RECT cr = rects[Chevron];
             int nudge = (int)Math.Round(pressE[Chevron].V * S(1));
             if (rects[Keyboard].Width > 0)
-                Gdi.Text(dc, "\uE765", rects[Keyboard], Gdi.Font(face, S(16), 400), white, Gdi.DT_CENTER | Gdi.DT_VCENTER);
-            if (cr.Width > 0) Gdi.Text(dc, "", new RECT(cr.Left, cr.Top + nudge, cr.Right, cr.Bottom + nudge), Gdi.Font(face, S(12), 400), white,
+                Text("\uE765", rects[Keyboard], Gdi.Font(face, S(16), 400), white, Gdi.DT_CENTER | Gdi.DT_VCENTER);
+            if (cr.Width > 0) Text(Edge == Edge.Top ? "" : Edge == Edge.Left ? "" : Edge == Edge.Right ? "" : "", new RECT(cr.Left, cr.Top + nudge, cr.Right, cr.Bottom + nudge), Gdi.Font(face, S(12), 400), white,
                 Gdi.DT_CENTER | Gdi.DT_VCENTER);
 
             // Iconos de sistema (en fila, o en columna si la barra es vertical)
@@ -282,7 +290,7 @@ namespace NeuTaskBar
                 : new RECT(sr.Left + S(5) + i * slot, sr.Top, sr.Left + S(5) + (i + 1) * slot, sr.Bottom);
 
             string netGlyph = net == NetKind.Ethernet ? "\uE839" : "\uE701";
-            Gdi.Text(dc, netGlyph, slotRect(0), iconFont, net == NetKind.None ? dim : white, Gdi.DT_CENTER | Gdi.DT_VCENTER);
+            Text(netGlyph, slotRect(0), iconFont, net == NetKind.None ? dim : white, Gdi.DT_CENTER | Gdi.DT_VCENTER);
 
             var vol = Volume != null ? Volume() : null;
             string volGlyph;
@@ -291,7 +299,7 @@ namespace NeuTaskBar
             else if (vol.Level < 34) volGlyph = "\uE993";
             else if (vol.Level < 67) volGlyph = "\uE994";
             else volGlyph = "\uE995";
-            Gdi.Text(dc, volGlyph, slotRect(1), iconFont, white, Gdi.DT_CENTER | Gdi.DT_VCENTER);
+            Text(volGlyph, slotRect(1), iconFont, white, Gdi.DT_CENTER | Gdi.DT_VCENTER);
 
             if (battery.Present)
             {
@@ -300,18 +308,26 @@ namespace NeuTaskBar
                 if (battery.Charging) gl = lvl >= 10 ? "\uE83E" : ((char)(0xE85A + Math.Min(lvl, 8))).ToString();
                 else gl = lvl >= 10 ? "\uE83F" : ((char)(0xE850 + lvl)).ToString();
                 int col = (!battery.Charging && battery.Percent <= 15) ? Native.Rgb(255, 99, 99) : white;
-                Gdi.Text(dc, gl, slotRect(2), iconFont, col, Gdi.DT_CENTER | Gdi.DT_VCENTER);
+                Text(gl, slotRect(2), iconFont, col, Gdi.DT_CENTER | Gdi.DT_VCENTER);
             }
 
             // Reloj (dos líneas; alineado a la derecha como en Windows 11, centrado en barras verticales)
             RECT clk = rects[Clock];
             if (clk.Width <= 0) return;
             IntPtr f = Gdi.Font("Segoe UI", clockPx > 0 ? clockPx : S(12), 400);
-            int cx0 = Vert ? clk.Left : clk.Left + S(4), cx1 = Vert ? clk.Right : clk.Right - S(8);
+            // En vertical el texto dispone de todo el ancho de la isla, por si ni con la letra mínima cabe en la celda.
+            int cx0 = Vert ? 0 : clk.Left + S(4), cx1 = Vert ? VisH : clk.Right - S(8);
             uint align = Vert ? Gdi.DT_CENTER : Gdi.DT_RIGHT;
+            int dateColor = Ink(210);
+            if (clockOneLine)
+            {
+                Text(timeText, new RECT(cx0, clk.Top, cx1 - clockDateW - S(8), clk.Bottom), f, white, align | Gdi.DT_VCENTER);
+                Text(DateShown, new RECT(cx1 - clockDateW, clk.Top, cx1, clk.Bottom), f, dateColor, align | Gdi.DT_VCENTER);
+                return;
+            }
             int mid = clk.Top + clk.Height / 2;
-            Gdi.Text(dc, timeText, new RECT(cx0, clk.Top, cx1, mid + S(1)), f, white, align | Gdi.DT_VCENTER);
-            Gdi.Text(dc, DateShown, new RECT(cx0, mid - S(1), cx1, clk.Bottom), f, Native.Rgb(210, 210, 210), align | Gdi.DT_VCENTER);
+            Text(timeText, new RECT(cx0, clk.Top, cx1, mid + S(1)), f, white, align | Gdi.DT_VCENTER);
+            Text(DateShown, new RECT(cx0, mid - S(1), cx1, clk.Bottom), f, dateColor, align | Gdi.DT_VCENTER);
         }
 
         public new void Destroy()

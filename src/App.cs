@@ -10,14 +10,16 @@ namespace NeuTaskBar
     {
         public const string HostClass = "NeuTaskBar.Host";
         public const uint WM_APP_APPBAR = Native.WM_APP + 1, WM_APP_TRAY = Native.WM_APP + 2, WM_APP_RESUME = Native.WM_APP + 3,
-            WM_APP_QUIT = Native.WM_APP + 4, WM_APP_VOLUME = Native.WM_APP + 6, WM_APP_NET = Native.WM_APP + 7;
+            WM_APP_QUIT = Native.WM_APP + 4, WM_APP_VOLUME = Native.WM_APP + 6, WM_APP_NET = Native.WM_APP + 7,
+            WM_APP_CONFIG = Native.WM_APP + 8, WM_APP_MOVE = Native.WM_APP + 9;
 
-        const uint T_REFRESH = 1, T_CLOCK = 2, T_SETUP = 3, T_NET = 4, T_TRIM = 5, T_ENTER = 6, T_FLY = 7, T_TOOLS = 8, T_HIDE = 9;
+        const uint T_REFRESH = 1, T_CLOCK = 2, T_SETUP = 3, T_NET = 4, T_TRIM = 5, T_ENTER = 6, T_FLY = 7, T_TOOLS = 8, T_HIDE = 9,
+            T_FILL = 10, T_WATCH = 11;
 
         static readonly WndProcDelegate HostProcDelegate = StaticHostProc;
         static App instance;
 
-        IntPtr host;
+        IntPtr host, host2;   // host2: solo para reservar la franja de un segundo borde
         enum FlyKind { Start = 0, Shell = 1, Overflow = 2 }
         readonly bool[] flyOpen = new bool[3];  // estado observado en el último refresco
         int shellOwner;                         // botón que abrió el panel del sistema: 1 = red/volumen, 2 = reloj
@@ -25,8 +27,10 @@ namespace NeuTaskBar
         LeftIsland left;
         ThumbFlyout flyout;
         TaskbarMenu menu;
+        readonly StripFill[] fills = new StripFill[2];   // uno por franja reservada
         int flyTicks;
         RightIsland right;
+        PlateIsland plate;                      // fondo común de las islas unidas
         PinStore pins;
         WindowTracker tracker;
         VolumeMonitor volume;
@@ -41,16 +45,28 @@ namespace NeuTaskBar
         IntPtr desktopWindow;
         RECT lastBarRect;
         int lastBarHeight = -1;
-        Edge barEdge = Edge.Bottom, lastBarEdge = Edge.Bottom;   // borde elegido en Windows y el último aplicado
+        Edge barEdge = Edge.Bottom;         // borde elegido en Windows
+        // Sitio de una isla: borde de pantalla, extremo de ese borde (inicio o final) y, solo la de aplicaciones sin
+        // esquina elegida, centrada como manda la alineación de Windows.
+        struct Spot { public Edge Edge; public bool End, Centered; }
+        Spot spotL, spotR;
+        bool joined, following;             // islas unidas; se está recolocando la que sigue a la otra
+        readonly Edge[] strips = new Edge[2];   // bordes con isla (cada uno reserva su franja)
+        int stripCount = 1, lastStripSig = -1;
+        int layH, layMargin;                // grosor de las islas y margen del último reparto (px)
+        bool moveMode;                      // las islas se arrastran (lo activa la aplicación hasta que se confirma)
+        readonly IntPtr[] targets = new IntPtr[4];   // marcas de las esquinas libres mientras se arrastra una isla
+        readonly RECT[] targetRects = new RECT[4];
+        readonly bool[] targetFree = new bool[4];
+        int targetHot = -1;
+        POINT moveOrigin;                   // centro de la isla al empezar a arrastrarla
         int lastEdgeCheck, lastPosChanged;
         bool smallWhenFull;                 // "botones pequeños cuando la barra esté llena" y ahora lo está
-        bool barRevealed = true;            // ocultación automática: la barra está a la vista
-        // true mientras la ocultación automática de la barra original la hemos puesto nosotros (para que no reserve sitio);
-        // false cuando su estado es el que el usuario ha elegido en Configuración y simplemente se sigue.
-        bool autoHideForced;
+        bool leftRevealed = true, rightRevealed = true;   // ocultación: la isla está a la vista
         bool userAutoHide;                  // lo que el usuario tiene elegido en "Ocultar automáticamente" (solo vale con la barra abajo)
-        int arrivedBottomTick;              // momento en que la barra de Windows volvió al borde inferior
-        int lastWantedTick, hideDist;
+        // false = las islas no reservan franja: las ventanas llegan hasta el borde y ocupan el hueco entre las dos islas.
+        bool barReserved = true;
+        int leftWantedTick, rightWantedTick, hideDist, barThick;
         RECT monRect;
 
         // ------------------------------------------------------------------ ciclo de vida
@@ -74,10 +90,22 @@ namespace NeuTaskBar
             pins = new PinStore();
             pins.Load();
 
+            for (int i = 0; i < fills.Length; i++)   // antes que las islas: deben quedar por debajo de ellas
+            {
+                fills[i] = new StripFill();
+                fills[i].Init();
+            }
+            plate = new PlateIsland();   // y la placa, por debajo de las dos
+            plate.Init();
             left = new LeftIsland();
             left.Init();
             right = new RightIsland();
             right.Init();
+            ApplyTints();
+            left.Moved = right.Moved = JoinFollow;
+            left.OnMoveStart = right.OnMoveStart = MoveStart;
+            left.OnMoving = right.OnMoving = Moving;
+            left.OnMoveEnd = right.OnMoveEnd = MoveEnd;
             tracker = new WindowTracker(pins, left.Icons, left.Hwnd, right.Hwnd);
             volume = new VolumeMonitor(host, WM_APP_VOLUME);
             right.Volume = () => volume;
@@ -185,58 +213,358 @@ namespace NeuTaskBar
             UpdateAutoHide();
         }
 
-        // Ocultación automática: arranca o detiene la vigilancia del cursor.
+        // Islas que se esconden: las dos con "Ocultar automáticamente la barra de tareas" de Windows, o cada una por su
+        // cuenta con los interruptores de Apariencia.
+        // Unidas forman una sola barra: se esconde entera con que se haya pedido esconder una de las dos.
+        static bool HidesLeft { get { return Config.AutoHide || Config.HideLeft || (Config.Join && Config.HideRight); } }
+        static bool HidesRight { get { return Config.AutoHide || Config.HideRight || (Config.Join && Config.HideLeft); } }
+
+        // Ocultación: arranca o detiene la vigilancia del cursor y deja a la vista las islas que no se esconden.
+        // Mientras se mueven las islas no se esconde ninguna.
         void UpdateAutoHide()
         {
-            if (Config.AutoHide && !paused)
-            {
-                lastWantedTick = Environment.TickCount;
-                Native.SetTimer(host, new UIntPtr(T_HIDE), 100, IntPtr.Zero);
-            }
-            else
-            {
-                Native.KillTimer(host, new UIntPtr(T_HIDE));
-                barRevealed = true;
-                left.SetAutoHidden(false, hideDist);
-                right.SetAutoHidden(false, hideDist);
-            }
+            bool l = HidesLeft && !paused && !moveMode, r = HidesRight && !paused && !moveMode;
+            if (l || r) Native.SetTimer(host, new UIntPtr(T_HIDE), 100, IntPtr.Zero);
+            else Native.KillTimer(host, new UIntPtr(T_HIDE));
+            leftWantedTick = rightWantedTick = Environment.TickCount;
+            if (!l) { leftRevealed = true; left.SetAutoHidden(false, hideDist); plate.SetAutoHidden(false, hideDist); }
+            if (!r) { rightRevealed = true; right.SetAutoHidden(false, hideDist); }
         }
 
-        // La barra aparece al llevar el cursor a su borde de pantalla (o al abrir Inicio, un panel o un menú)
-        // y se esconde poco después de que el cursor la abandone, como la barra de Windows.
+        // Distancia del cursor al borde de pantalla en el que está una isla.
+        int EdgeDist(Edge e, POINT p)
+        {
+            RECT rc = monRect;
+            return e == Edge.Bottom ? rc.Bottom - 1 - p.Y : e == Edge.Top ? p.Y - rc.Top : e == Edge.Left ? p.X - rc.Left : rc.Right - 1 - p.X;
+        }
+
+        // Con la ocultación de Windows la barra entera aparece al llevar el cursor a su borde de pantalla (o al abrir
+        // Inicio, un panel o un menú) y se esconde poco después de que el cursor la abandone, como la barra de Windows.
+        // Con la de Apariencia cada isla atiende solo a su sitio y a sus propios paneles.
         void AutoHideTick()
         {
-            if (paused || !Config.AutoHide) { UpdateAutoHide(); return; }
+            if (paused || moveMode || !(HidesLeft || HidesRight)) { UpdateAutoHide(); return; }
             POINT p;
             Native.GetCursorPos(out p);
             RECT rc = monRect;
             bool inside = p.X >= rc.Left && p.X < rc.Right && p.Y >= rc.Top && p.Y < rc.Bottom;
             int near = left.S(2), zone = hideDist;
-            int d = barEdge == Edge.Bottom ? rc.Bottom - 1 - p.Y : barEdge == Edge.Top ? p.Y - rc.Top
-                  : barEdge == Edge.Left ? p.X - rc.Left : rc.Right - 1 - p.X;
-            bool atEdge = inside && d <= near;
-            bool overBar = inside && d <= zone;
-            bool busy = menu.Visible || flyout.Visible || IsFlyoutOpen(FlyKind.Start) || IsFlyoutOpen(FlyKind.Shell) || IsFlyoutOpen(FlyKind.Overflow);
-            int now = Environment.TickCount;
-            if (atEdge || busy || (barRevealed && overBar))
+            // Cada isla mira a su propio borde de pantalla (pueden estar en bordes distintos).
+            int dl = EdgeDist(left.Edge, p), dr = EdgeDist(right.Edge, p);
+            bool start = IsFlyoutOpen(FlyKind.Start), panels = IsFlyoutOpen(FlyKind.Shell) || IsFlyoutOpen(FlyKind.Overflow);
+            bool wantLeft, wantRight, holdLeft, holdRight;
+            if (Config.AutoHide)
             {
-                lastWantedTick = now;
-                if (!barRevealed)
+                bool busy = menu.Visible || flyout.Visible || start || panels;
+                wantLeft = (inside && dl <= near) || busy;
+                wantRight = (inside && dr <= near) || busy;
+                holdLeft = inside && dl <= zone;
+                holdRight = inside && dr <= zone;
+            }
+            else
+            {
+                // La franja sigue reservada, así que en el sitio de la isla escondida no hay nada más: basta con pasar por él.
+                bool overLeft = OverIsland(left, p), overRight = OverIsland(right, p);
+                wantLeft = (inside && dl < barThick && overLeft) || flyout.Visible || start;
+                wantRight = (inside && dr < barThick && overRight) || panels;
+                holdLeft = (inside && dl <= zone && overLeft) || menu.Visible;
+                holdRight = (inside && dr <= zone && overRight) || menu.Visible;
+            }
+            if (joined)
+            {
+                wantLeft = wantRight = wantLeft || wantRight;
+                holdLeft = holdRight = holdLeft || holdRight;
+            }
+            if (HidesLeft && HideStep(left, ref leftRevealed, ref leftWantedTick, wantLeft, holdLeft)) flyout.HideNow();
+            if (HidesRight) HideStep(right, ref rightRevealed, ref rightWantedTick, wantRight, holdRight);
+            if (joined) plate.SetAutoHidden(!leftRevealed, hideDist);
+        }
+
+        // El cursor está en el tramo de la barra que ocupa la isla (con un pequeño margen a los lados).
+        bool OverIsland(Island isl, POINT p)
+        {
+            RECT r = isl.RestRect;
+            int pad = isl.S(6);
+            return IsVert(isl.Edge) ? p.Y >= r.Top - pad && p.Y < r.Bottom + pad : p.X >= r.Left - pad && p.X < r.Right + pad;
+        }
+
+        // Muestra la isla si se la reclama (want) y la esconde poco después de que deje de reclamarse o retenerse (hold).
+        // Devuelve true si la acaba de esconder.
+        bool HideStep(Island isl, ref bool revealed, ref int wantedTick, bool want, bool hold)
+        {
+            int now = Environment.TickCount;
+            if (want || (revealed && hold))
+            {
+                wantedTick = now;
+                if (!revealed)
                 {
-                    barRevealed = true;
-                    left.SetAutoHidden(false, hideDist);
-                    right.SetAutoHidden(false, hideDist);
-                    left.RaiseTopmost();
-                    right.RaiseTopmost();
+                    revealed = true;
+                    isl.SetAutoHidden(false, hideDist);
+                    isl.RaiseTopmost();
                 }
             }
-            else if (barRevealed && (now - lastWantedTick > 450 || now < lastWantedTick))
+            else if (revealed && (now - wantedTick > 450 || now < wantedTick))
             {
-                barRevealed = false;
-                flyout.HideNow();
-                left.SetAutoHidden(true, hideDist);
-                right.SetAutoHidden(true, hideDist);
+                revealed = false;
+                isl.SetAutoHidden(true, hideDist);
+                return true;
             }
+            return false;
+        }
+
+        // Las islas transparentes ajustan su tinta a lo que tienen detrás, que cambia sin que ellas se enteren.
+        void WatchBackdrops()
+        {
+            left.WatchBackdrop();
+            right.WatchBackdrop();
+        }
+
+        // La aplicación ha guardado un ajuste en config.ini: se vuelve a leer y se aplica al momento.
+        void ReloadConfig()
+        {
+            Config.Load();
+            ApplyTints();
+            UpdateTrayTip();   // por si ha cambiado el idioma
+            if (paused) return;
+            lastBarHeight = -1;
+            lastSig = "";
+            ApplyLayout();
+            UpdateAutoHide();
+        }
+
+        // Color de cada isla. Unidas, el color lo lleva la placa (el de la isla de aplicaciones) y las dos islas van
+        // transparentes encima de ella.
+        void ApplyTints()
+        {
+            if (Config.Join)
+            {
+                plate.SetTint(Config.TintLeft);
+                left.SetTint(0);
+                right.SetTint(0);
+                if (!plate.Clear) { left.AdoptInk(plate); right.AdoptInk(plate); }
+            }
+            else
+            {
+                left.SetTint(Config.TintLeft);
+                right.SetTint(Config.TintRight);
+            }
+        }
+
+        void ShowIslands(bool show)
+        {
+            left.Show(show);
+            right.Show(show);
+            plate.Show(show && joined);
+            if (show && joined) plate.PlaceBehind(left.Hwnd);
+        }
+
+        // Por encima de las demás ventanas, con la de información sobre la de aplicaciones y la placa bajo las dos.
+        void RaiseIslands()
+        {
+            left.RaiseTopmost();
+            right.RaiseTopmost();
+            if (joined) plate.PlaceBehind(left.Hwnd);
+        }
+
+        // ------------------------------------------------------------------ mover las islas
+
+        // La aplicación abre y cierra el modo mover: mientras dura, las islas se arrastran a la esquina que se quiera.
+        void SetMoveMode(bool on)
+        {
+            if (on && paused) on = false;
+            if (on == moveMode) return;
+            moveMode = on;
+            left.Movable = right.Movable = on;
+            flyout.HideNow();
+            menu.Close();
+            ShowTargets(null);
+            UpdateAutoHide();
+            left.Invalidate();
+            right.Invalidate();
+        }
+
+        // Esquina (0 arriba-izq., 1 arriba-dcha., 2 abajo-izq., 3 abajo-dcha.) que ocupa un sitio, y al revés. Las islas
+        // van tumbadas o de pie como la barra de Windows.
+        static bool IsVert(Edge e) { return e == Edge.Left || e == Edge.Right; }
+
+        static int CornerOf(Spot s)
+        {
+            if (IsVert(s.Edge)) return (s.Edge == Edge.Right ? 1 : 0) | (s.End ? 2 : 0);
+            return (s.Edge == Edge.Bottom ? 2 : 0) | (s.End ? 1 : 0);
+        }
+
+        Spot SpotAt(int corner)
+        {
+            bool right = (corner & 1) != 0, bottom = (corner & 2) != 0;
+            var s = new Spot();
+            if (IsVert(barEdge)) { s.Edge = right ? Edge.Right : Edge.Left; s.End = bottom; }
+            else { s.Edge = bottom ? Edge.Bottom : Edge.Top; s.End = right; }
+            return s;
+        }
+
+        // Dónde va cada isla: en la esquina elegida o, si no se ha elegido, donde manda la barra de Windows (la de
+        // aplicaciones al inicio o centrada; la de información al final). Unidas, la segunda sigue a la primera.
+        void ResolveSpots()
+        {
+            spotL = Config.CornerLeft >= 0 ? SpotAt(Config.CornerLeft) : new Spot { Edge = barEdge, Centered = Config.Center };
+            spotR = Config.CornerRight >= 0 ? SpotAt(Config.CornerRight) : new Spot { Edge = barEdge, End = true };
+            joined = Config.Join;
+            if (joined) { spotR = spotL; spotR.Centered = false; }
+            else if (!spotL.Centered && CornerOf(spotL) == CornerOf(spotR)) spotR.End = !spotR.End;   // nunca las dos en la misma
+            strips[0] = spotL.Edge;
+            strips[1] = spotR.Edge;
+            stripCount = spotL.Edge == spotR.Edge ? 1 : 2;
+        }
+
+        bool EdgeUsed(Edge e) { return strips[0] == e || (stripCount > 1 && strips[1] == e); }
+
+        // Coordenada del lado de una isla pegado a su borde de pantalla, y la del lado que mira al centro.
+        int Cross(Edge e)
+        {
+            RECT rc = monRect;
+            return e == Edge.Top ? rc.Top + layMargin : e == Edge.Left ? rc.Left + layMargin : e == Edge.Right ? rc.Right - layMargin : rc.Bottom - layMargin;
+        }
+
+        int AnchorOf(Edge e) { return e == Edge.Top || e == Edge.Left ? Cross(e) + layH : Cross(e) - layH; }
+
+        // Rectángulo que ocuparía en una esquina una isla de esa longitud.
+        RECT CornerRect(int corner, int len)
+        {
+            Spot s = SpotAt(corner);
+            RECT rc = monRect;
+            bool vert = IsVert(s.Edge);
+            int a0 = vert ? rc.Top : rc.Left, a1 = vert ? rc.Bottom : rc.Right;
+            int along = s.End ? a1 - layMargin - len : a0 + layMargin;
+            int c0 = Math.Min(Cross(s.Edge), AnchorOf(s.Edge));
+            return vert ? new RECT(c0, along, c0 + layH, along + len) : new RECT(along, c0, along + len, c0 + layH);
+        }
+
+        void MoveStart(Island isl)
+        {
+            RECT w;
+            Native.GetWindowRect(isl.Hwnd, out w);
+            moveOrigin = new POINT((w.Left + w.Right) / 2, (w.Top + w.Bottom) / 2);
+            ShowTargets(isl);
+        }
+
+        void Moving(Island isl, int x, int y)
+        {
+            if (joined)
+            {
+                // Unidas van juntas: la otra isla y la placa acompañan a la que se arrastra.
+                (isl == left ? (Island)right : left).FloatBy(x - moveOrigin.X, y - moveOrigin.Y);
+                plate.FloatBy(x - moveOrigin.X, y - moveOrigin.Y);
+            }
+            int hot = NearestTarget(x, y);
+            if (hot == targetHot) return;
+            targetHot = hot;
+            for (int i = 0; i < 4; i++)
+                if (targetFree[i]) Native.SetLayeredWindowAttributes(targets[i], 0, (byte)(i == hot ? 150 : 60), 2 /* LWA_ALPHA */);
+        }
+
+        // Al soltar la isla se queda en la esquina libre más cercana, y se guarda.
+        void MoveEnd(Island isl, int x, int y)
+        {
+            int corner = NearestTarget(x, y);
+            ShowTargets(null);
+            left.Settle();
+            right.Settle();
+            plate.Settle();
+            if (corner < 0) return;
+            if (joined || isl == left)
+            {
+                Config.CornerLeft = corner;
+                Config.Save("cornerleft", Config.CornerName(corner));
+            }
+            else
+            {
+                Config.CornerRight = corner;
+                Config.Save("cornerright", Config.CornerName(corner));
+            }
+            lastBarHeight = -1;
+            lastSig = "";
+            ApplyLayout();
+        }
+
+        int NearestTarget(int x, int y)
+        {
+            int best = -1;
+            long bestD = long.MaxValue;
+            for (int i = 0; i < 4; i++)
+            {
+                if (!targetFree[i]) continue;
+                RECT r = targetRects[i];
+                long dx = x - (r.Left + r.Right) / 2, dy = y - (r.Top + r.Bottom) / 2;
+                if (dx * dx + dy * dy < bestD) { bestD = dx * dx + dy * dy; best = i; }
+            }
+            return best;
+        }
+
+        const string TargetClass = "NeuTaskBar.Target";
+        static readonly WndProcDelegate TargetProc = (h, m, w, l) => Native.DefWindowProcW(h, m, w, l);
+
+        // Marcas translúcidas en las esquinas donde puede soltarse la isla que se arrastra (null = quitarlas): todas
+        // menos la que ocupa la otra isla; unidas se mueven juntas y vale cualquiera.
+        void ShowTargets(Island isl)
+        {
+            targetHot = -1;
+            if (isl != null && targets[0] == IntPtr.Zero)
+            {
+                var wc = new WNDCLASS();
+                wc.lpfnWndProc = Marshal.GetFunctionPointerForDelegate(TargetProc);
+                wc.hInstance = Native.GetModuleHandleW(null);
+                wc.hbrBackground = Native.CreateSolidBrush(Native.Rgb(76, 194, 255));
+                wc.lpszClassName = TargetClass;
+                Native.RegisterClassW(ref wc);
+                int ex = Native.WS_EX_TOPMOST | Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE | Native.WS_EX_LAYERED | Native.WS_EX_TRANSPARENT;
+                for (int i = 0; i < 4; i++)
+                {
+                    targets[i] = Native.CreateWindowExW(ex, TargetClass, "", Native.WS_POPUP, 0, 0, 10, 10, IntPtr.Zero, IntPtr.Zero, wc.hInstance, IntPtr.Zero);
+                    if (!Island.IsWin11) continue;
+                    int round = 2; // DWMWCP_ROUND
+                    Native.DwmSetWindowAttribute(targets[i], Native.DWMWA_WINDOW_CORNER_PREFERENCE, ref round, 4);
+                }
+            }
+            if (targets[0] == IntPtr.Zero) return;
+            Spot other = isl == left ? spotR : spotL;
+            int taken = isl == null || joined || (isl == right && spotL.Centered) ? -1 : CornerOf(other);
+            int len = joined ? left.VisW + right.VisW : isl == null ? 0 : isl.VisW;
+            for (int i = 0; i < 4; i++)
+            {
+                targetFree[i] = isl != null && i != taken;
+                if (!targetFree[i]) { Native.ShowWindow(targets[i], Native.SW_HIDE); continue; }
+                RECT r = targetRects[i] = CornerRect(i, len);
+                Native.SetLayeredWindowAttributes(targets[i], 0, 60, 2 /* LWA_ALPHA */);
+                Native.SetWindowPos(targets[i], Native.HWND_TOPMOST, r.Left, r.Top, r.Width, r.Height,
+                    Native.SWP_NOACTIVATE | Native.SWP_NOOWNERZORDER | Native.SWP_SHOWWINDOW);
+            }
+        }
+
+        // Islas unidas: la de información va pegada a continuación de la de aplicaciones (o esta termina donde empieza
+        // aquella, si la barra va al final del borde), y la placa abarca las dos. Se repasa cada vez que una cambia de
+        // sitio o de tamaño.
+        void JoinFollow()
+        {
+            if (!joined || following || plate == null) return;
+            following = true;
+            Edge e = spotL.Edge;
+            bool vert = IsVert(e);
+            int cross = Cross(e);
+            if (spotL.End)
+            {
+                RECT r = right.RestRect;
+                left.SetPlacement(e, cross, vert ? r.Top : r.Left);
+            }
+            else
+            {
+                RECT l = left.RestRect;
+                right.SetPlacement(e, cross, vert ? l.Bottom : l.Right);
+            }
+            RECT first = left.RestRect;
+            plate.VisW = left.VisW + right.VisW;
+            plate.VisH = left.VisH;
+            plate.SetPlacement(e, cross, vert ? first.Top : first.Left);
+            following = false;
         }
 
         void Resume()
@@ -254,11 +582,11 @@ namespace NeuTaskBar
 
             if (!SetupShell()) Native.SetTimer(host, new UIntPtr(T_SETUP), 1000, IntPtr.Zero);
             InstallHooks();
+            FollowTaskbarSize(barEdge);
             ApplyLayout();
             lastSig = "";
             RefreshApps();
-            left.Show(!islandsHiddenForFullscreen);
-            right.Show(!islandsHiddenForFullscreen);
+            ShowIslands(!islandsHiddenForFullscreen);
             UpdateTrayTip();
             UpdateAutoHide();
             Native.SetTimer(host, new UIntPtr(T_TRIM), 8000, IntPtr.Zero);
@@ -268,12 +596,10 @@ namespace NeuTaskBar
         {
             if (!ShellTaskbar.Hide()) return false;
             barEdge = Config.ReadTaskbarEdge();
-            // Lo que el usuario tenía elegido en Windows antes de sustituir la barra. Si no la tenía en ocultación
-            // automática, Hide() la ha puesto en ese modo solo para que no reserve su franja.
+            // Lo que el usuario tiene elegido en Windows: la ocultación automática de la barra original se respeta y se sigue.
             userAutoHide = ShellTaskbar.OriginalAutoHide();
             Config.AutoHide = userAutoHide && barEdge == Edge.Bottom;
-            autoHideForced = !userAutoHide;
-            ShellTaskbar.RegisterBar(host, WM_APP_APPBAR);
+            FollowTaskbarSize(barEdge);
             lastBarHeight = -1;
             ApplyLayout();
             return true;
@@ -289,9 +615,11 @@ namespace NeuTaskBar
             RemoveHooks();
             flyout.HideNow();
             menu.Close();
-            left.Show(false);
-            right.Show(false);
+            SetMoveMode(false);
+            ShowIslands(false);
+            foreach (var f in fills) f.Hide();
             ShellTaskbar.UnregisterBar(host);
+            ShellTaskbar.UnregisterBar(host2);
             ShellTaskbar.Restore();
             volume.Detach();
             UpdateTrayTip();
@@ -303,8 +631,12 @@ namespace NeuTaskBar
             RemoveTrayIcon();
             flyout.Destroy();
             menu.Destroy();
+            foreach (var f in fills) f.Destroy();
+            foreach (var t in targets) if (t != IntPtr.Zero) Native.DestroyWindow(t);
             right.Destroy();
             left.Destroy();
+            plate.Destroy();
+            Native.DestroyWindow(host2);
             Native.DestroyWindow(host);
             Native.PostQuitMessage(0);
         }
@@ -319,6 +651,11 @@ namespace NeuTaskBar
             wc.lpszClassName = HostClass;
             Native.RegisterClassW(ref wc);
             host = Native.CreateWindowExW(Native.WS_EX_TOOLWINDOW, HostClass, "NeuTaskBar", Native.WS_POPUP, 0, 0, 0, 0,
+                IntPtr.Zero, IntPtr.Zero, wc.hInstance, IntPtr.Zero);
+            // Otra clase, para que quien busque la ventana del motor por su clase encuentre siempre la principal.
+            wc.lpszClassName = HostClass + "2";
+            Native.RegisterClassW(ref wc);
+            host2 = Native.CreateWindowExW(Native.WS_EX_TOOLWINDOW, wc.lpszClassName, "NeuTaskBar", Native.WS_POPUP, 0, 0, 0, 0,
                 IntPtr.Zero, IntPtr.Zero, wc.hInstance, IntPtr.Zero);
         }
 
@@ -361,6 +698,8 @@ namespace NeuTaskBar
                 case WM_APP_TRAY: OnTrayMessage((uint)(l.ToInt64() & 0xFFFF)); return IntPtr.Zero;
                 case WM_APP_RESUME: if (paused) Resume(); return IntPtr.Zero;
                 case WM_APP_QUIT: Quit(); return IntPtr.Zero;
+                case WM_APP_CONFIG: ReloadConfig(); return IntPtr.Zero;
+                case WM_APP_MOVE: SetMoveMode(w != IntPtr.Zero); return IntPtr.Zero;
                 case WM_APP_VOLUME:
                     volume.Query();
                     right.Refresh();
@@ -401,6 +740,19 @@ namespace NeuTaskBar
                     if (paused) { Native.KillTimer(host, new UIntPtr(T_TOOLS)); break; }
                     if (Config.ReadWindowsTaskbarSettings()) ApplyWindowsSettings();
                     CheckTaskbarEdge();
+                    FitWorkArea();
+                    UpdateFill();
+                    WatchBackdrops();
+                    // Si la aplicación se cerró sin confirmar, las islas no se quedan sueltas.
+                    if (moveMode && Native.FindMainWindow() == IntPtr.Zero) SetMoveMode(false);
+                    break;
+                case T_FILL:
+                    Native.KillTimer(host, new UIntPtr(T_FILL));
+                    UpdateFill();
+                    break;
+                case T_WATCH:
+                    foreach (var f in fills) f.Watch();
+                    WatchBackdrops();
                     break;
                 case T_HIDE:
                     AutoHideTick();
@@ -578,6 +930,8 @@ namespace NeuTaskBar
             hooks.Add(Native.SetWinEventHook(Native.EVENT_SYSTEM_MINIMIZESTART, Native.EVENT_SYSTEM_MINIMIZEEND, IntPtr.Zero, winEventProc, 0, 0, flags));
             hooks.Add(Native.SetWinEventHook(Native.EVENT_OBJECT_CREATE, Native.EVENT_OBJECT_HIDE, IntPtr.Zero, winEventProc, 0, 0, flags));
             hooks.Add(Native.SetWinEventHook(Native.EVENT_OBJECT_CLOAKED, Native.EVENT_OBJECT_UNCLOAKED, IntPtr.Zero, winEventProc, 0, 0, flags));
+            // Maximizar o restaurar una ventana no genera ninguno de los anteriores: hace falta para el relleno de la franja.
+            hooks.Add(Native.SetWinEventHook(Native.EVENT_OBJECT_LOCATIONCHANGE, Native.EVENT_OBJECT_LOCATIONCHANGE, IntPtr.Zero, winEventProc, 0, 0, flags));
             // Con etiquetas en los botones hay que enterarse de los cambios de título de las ventanas.
             if (Config.Combine != 0)
                 hooks.Add(Native.SetWinEventHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE, IntPtr.Zero, winEventProc, 0, 0, flags));
@@ -595,6 +949,13 @@ namespace NeuTaskBar
         void OnWinEvent(IntPtr hook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
         {
             if (idObject != Native.OBJID_WINDOW || idChild != 0 || hwnd == IntPtr.Zero) return;
+            if (evt == Native.EVENT_OBJECT_LOCATIONCHANGE)
+            {
+                // Llegan muchos seguidos mientras se arrastra una ventana: se atiende cuando paran.
+                if (!paused && Native.GetAncestor(hwnd, 1 /* GA_PARENT */) == desktopWindow)
+                    Native.SetTimer(host, new UIntPtr(T_FILL), 40, IntPtr.Zero);
+                return;
+            }
             if ((evt >= Native.EVENT_OBJECT_CREATE && evt <= Native.EVENT_OBJECT_HIDE) || evt == EVENT_OBJECT_NAMECHANGE)
             {
                 // Solo ventanas de nivel superior (las hijas generan muchísimo ruido).
@@ -627,116 +988,168 @@ namespace NeuTaskBar
             RECT rc = mi.rcMonitor;
 
             int dpi = Native.GetMonitorDpi(mon);
-            left.Dpi = right.Dpi = dpi;
-            int h = left.S(Config.Height);
+            left.Dpi = right.Dpi = plate.Dpi = dpi;
+            int h = left.S(Config.BarHeight);
             // Botones más pequeños (siempre, o solo cuando la barra está llena): iconos a 2/3 de su tamaño, como en Windows.
             bool small = Config.SmallButtons == 0 || (Config.SmallButtons == 2 && smallWhenFull);
             left.Small = small;
-            if (left.Icons.SetPx(left.S(small ? Math.Max(16, Config.IconSize * 2 / 3) : Config.IconSize))) lastSig = "";
+            if (left.Icons.SetPx(left.S(small ? Math.Max(16, Config.BarIconSize * 2 / 3) : Config.BarIconSize))) lastSig = "";
             int margin = left.S(Config.Margin);
-            Edge edge = barEdge;
-            bool vert = edge == Edge.Left || edge == Edge.Right;
-            // Coordenada del lado de las islas pegado al borde de pantalla, y la del lado que mira al centro.
-            int cross, anchor;
-            switch (edge)
-            {
-                case Edge.Top: cross = rc.Top + margin; anchor = cross + h; break;
-                case Edge.Left: cross = rc.Left + margin; anchor = cross + h; break;
-                case Edge.Right: cross = rc.Right - margin; anchor = cross - h; break;
-                default: cross = rc.Bottom - margin; anchor = cross - h; break;
-            }
+            monRect = rc;
+            layH = h;
+            layMargin = margin;
+            bool wasJoined = joined;
+            ResolveSpots();
+            Edge el = spotL.Edge, er = spotR.Edge;
+            bool vert = IsVert(barEdge);
             flyout.Dpi = dpi;
             menu.Dpi = dpi;
             menu.Monitor = rc;
             flyout.Monitor = rc;
-            menu.Edge = flyout.Edge = edge;
-            flyout.Anchor = anchor;
+            // Las vistas previas salen de la isla de aplicaciones; el menú, de la isla desde la que se abra (OpenMenu).
+            menu.Edge = flyout.Edge = el;
+            flyout.Anchor = AnchorOf(el);
 
-            // La isla izquierda arranca al principio de la barra (izquierda/arriba) y la derecha termina al final (derecha/abajo).
-            right.SetPlacement(edge, cross, vert ? rc.Bottom - margin : rc.Right - margin);
-            right.Layout();
-            left.MaxWidth = (vert ? rc.Height : rc.Width) - right.VisW - margin * 3 - left.S(24);
-            // Alineación de la barra: al centro de la pantalla (sin pisar la isla derecha) o al inicio.
+            // Cada isla va al inicio (izquierda/arriba) o al final (derecha/abajo) de su borde; la de aplicaciones
+            // puede ir además centrada, sin pisar a la otra si comparten borde.
             int a0 = vert ? rc.Top : rc.Left, a1 = vert ? rc.Bottom : rc.Right;
-            left.Centered = Config.Center;
-            left.CenterPos = (a0 + a1) / 2;
-            left.CenterMin = a0 + margin;
-            left.CenterMax = a1 - margin - right.VisW - left.S(12);
-            left.SetPlacement(edge, cross, vert ? rc.Top + margin : rc.Left + margin);
-            left.Layout();
+            if (joined != wasJoined) ApplyTints();
+            following = true;   // el seguimiento de las islas unidas se hace una vez, al final
+            if (joined)
+            {
+                right.AnchorEnd = spotL.End;
+                right.SetPlacement(el, Cross(el), spotL.End ? a1 - margin : a0 + margin);
+                right.Layout();
+                left.MaxWidth = a1 - a0 - right.VisW - margin * 2 - left.S(24);
+                left.Centered = spotL.Centered;
+                left.CenterPos = (a0 + a1 - right.VisW) / 2;
+                left.CenterMin = a0 + margin;
+                left.CenterMax = a1 - margin - right.VisW;
+                left.AnchorEnd = spotL.End;
+                left.SetPlacement(el, Cross(el), spotL.End ? a1 - margin - right.VisW : a0 + margin);
+                left.Layout();
+            }
+            else
+            {
+                bool same = el == er;
+                right.AnchorEnd = spotR.End;
+                right.SetPlacement(er, Cross(er), spotR.End ? a1 - margin : a0 + margin);
+                right.Layout();
+                left.MaxWidth = a1 - a0 - (same ? right.VisW + margin : 0) - margin * 2 - left.S(24);
+                left.Centered = spotL.Centered;
+                left.CenterPos = (a0 + a1) / 2;
+                left.CenterMin = a0 + margin + (same && !spotR.End ? right.VisW + left.S(12) : 0);
+                left.CenterMax = a1 - margin - (same && spotR.End ? right.VisW + left.S(12) : 0);
+                left.AnchorEnd = spotL.End;
+                left.SetPlacement(el, Cross(el), spotL.End ? a1 - margin : a0 + margin);
+                left.Layout();
+            }
+            following = false;
+            JoinFollow();
+            if (joined != wasJoined && started && !paused) ShowIslands(!islandsHiddenForFullscreen);
 
-            monRect = rc;
             hideDist = h + margin + left.S(14);
-            int reserved = h + margin;
-            if (Config.AutoHide)
+            int reserved = barThick = h + margin;
+            // Se reserva la franja de las islas para que las ventanas maximizadas terminen donde empiezan y no tapen nada
+            // de la app (el hueco entre las dos lo rellena StripFill con los colores de esa ventana). Solo con la
+            // ocultación automática del usuario no se reserva: ahí las islas se esconden y las ventanas ocupan todo.
+            // Con las islas escondidas desde Apariencia la franja sigue reservada: Windows guarda igualmente la de su
+            // barra, y sin el relleno se vería el escritorio bajo las ventanas maximizadas.
+            barReserved = !Config.AutoHide;
+            // Una franja por borde con isla: la primera con la ventana principal y la segunda, si hay islas en dos
+            // bordes, con la auxiliar.
+            IntPtr[] bars = { host, host2 };
+            for (int i = 0; i < bars.Length; i++)
             {
-                // Con ocultación automática la barra no reserva sitio: las ventanas ocupan toda la pantalla.
-                if (ShellTaskbar.BarRegistered) ShellTaskbar.UnregisterBar(host);
+                bool want = barReserved && i < stripCount && ShellTaskbar.IsHiddenByUs();
+                if (want == ShellTaskbar.BarRegistered(bars[i])) continue;
+                if (want) ShellTaskbar.RegisterBar(bars[i], WM_APP_APPBAR); else ShellTaskbar.UnregisterBar(bars[i]);
                 lastBarHeight = -1;
             }
-            else if (!ShellTaskbar.BarRegistered && ShellTaskbar.IsHiddenByUs())
-            {
-                ShellTaskbar.RegisterBar(host, WM_APP_APPBAR);
-                lastBarHeight = -1;
-            }
-            if (!Config.AutoHide && (reserved != lastBarHeight || edge != lastBarEdge || rc.Left != lastBarRect.Left || rc.Top != lastBarRect.Top
+            int stripSig = stripCount | ((int)strips[0] << 4) | ((int)strips[1] << 8);
+            if (barReserved && (reserved != lastBarHeight || stripSig != lastStripSig || rc.Left != lastBarRect.Left || rc.Top != lastBarRect.Top
                 || rc.Bottom != lastBarRect.Bottom || rc.Right != lastBarRect.Right))
             {
                 lastBarHeight = reserved;
-                lastBarEdge = edge;
+                lastStripSig = stripSig;
                 lastBarRect = rc;
-                ShellTaskbar.SetBarPos(host, rc, reserved, edge);
+                for (int i = 0; i < stripCount; i++) ShellTaskbar.SetBarPos(bars[i], rc, reserved, strips[i]);
             }
+            UpdateFill();
             // Si cambió el tamaño de icono se vació la caché: reconstruye las imágenes antes de volver a pintar.
             if (lastSig.Length == 0 && started && !paused) RefreshApps();
         }
 
-        // "Ocultar automáticamente la barra de tareas": Configuración cambia el estado real de la barra original, y eso
-        // es lo que se sigue. Hay que separar lo que elige el usuario de lo que ponemos nosotros (al sustituir la barra se
-        // deja en ocultación automática para que no reserve su franja) y de lo que hace Windows por su cuenta: fuera del
-        // borde inferior desactiva la ocultación, y al volver abajo repone la que había al salir.
-        // Devuelve true si hay que recolocar las islas.
-        bool FollowAutoHide(Edge edge, bool edgeChanged)
+        // Relleno del hueco entre las islas: prolonga la ventana maximizada que quede a la vista junto a la franja.
+        void UpdateFill()
         {
-            if (!ShellTaskbar.IsHiddenByUs()) return false;
-            bool? liveState = ShellTaskbar.LiveAutoHide();
-            if (liveState == null) return false;
-            bool live = liveState.Value, relayout = false, wasForced = autoHideForced;
-            if (ShellTaskbar.IsTrayVisible()) { ShellTaskbar.HideWindow(); relayout = true; }
-
-            int now = Environment.TickCount;
-            if (edge != Edge.Bottom)
+            if (fills[0] == null || left == null) return;
+            bool on = !paused && started && barReserved && lastBarHeight >= 0 && !islandsHiddenForFullscreen;
+            IntPtr src = on ? StripFill.TopMaximized(Native.MonitorFromPoint(new POINT(0, 0), 1 /* MONITOR_DEFAULTTOPRIMARY */)) : IntPtr.Zero;
+            bool any = false;
+            for (int i = 0; i < fills.Length; i++)
             {
-                autoHideForced = false;     // aquí Windows no admite la ocultación automática: nada que forzar ni que seguir
+                RECT strip = lastBarRect;
+                bool used = on && i < stripCount;
+                if (used)
+                    switch (strips[i])
+                    {
+                        case Edge.Top: strip.Bottom = strip.Top + lastBarHeight; break;
+                        case Edge.Left: strip.Right = strip.Left + lastBarHeight; break;
+                        case Edge.Right: strip.Left = strip.Right - lastBarHeight; break;
+                        default: strip.Top = strip.Bottom - lastBarHeight; break;
+                    }
+                fills[i].Update(strip, strips[i], used ? src : IntPtr.Zero, left.S(6));
+                any |= fills[i].Visible;
             }
-            else
-            {
-                if (edgeChanged) arrivedBottomTick = now;
-                bool arriving = edgeChanged || (now - arrivedBottomTick < 2500 && now >= arrivedBottomTick);
-                if (arriving)
-                {
-                    // Recién llegada abajo: si Windows la deja en ocultación y el usuario no la quería, es la nuestra.
-                    autoHideForced = live && !userAutoHide;
-                }
-                else if (autoHideForced)
-                {
-                    // El usuario la ha desmarcado en Configuración (donde se veía marcada): sigue sin quererla.
-                    if (!live) autoHideForced = false;
-                }
-                else if (live != userAutoHide)
-                {
-                    // El usuario la ha cambiado en Configuración.
-                    userAutoHide = live;
-                    ShellTaskbar.SetOriginalAutoHide(live);
-                }
-            }
-
-            bool effective = edge == Edge.Bottom && userAutoHide;
-            if (effective != Config.AutoHide) { Config.AutoHide = effective; relayout = true; }
-            return relayout || wasForced != autoHideForced;
+            if (any) Native.SetTimer(host, new UIntPtr(T_WATCH), 300, IntPtr.Zero);
+            else Native.KillTimer(host, new UIntPtr(T_WATCH));
         }
 
-        // Si el usuario mueve la barra de Windows a otro borde o cambia su ocultación automática, las islas lo siguen.
+        // Windows reserva la franja de su propia barra (invisible, pero ahí sigue), que puede ser más gruesa que las islas
+        // (barra pequeña en un lateral, botones con etiqueta): el área de trabajo se ajusta para que no quede un hueco
+        // entre las islas y las ventanas. Windows la recalcula por su cuenta de vez en cuando, así que se repasa con el
+        // temporizador (nunca al recibir sus avisos: sería un bucle).
+        void FitWorkArea()
+        {
+            if (paused || !barReserved || lastBarHeight < 0 || !ShellTaskbar.IsHiddenByUs()) return;
+            // Si ya no queda ninguna isla en el borde de la barra de Windows, su franja se libera entera.
+            ShellTaskbar.FitWorkArea(lastBarRect, EdgeUsed(barEdge) ? lastBarHeight : 0, barEdge);
+        }
+
+        // "Ocultar automáticamente la barra de tareas": Configuración cambia el estado real de la barra original, y eso
+        // es lo que se sigue (fuera del borde inferior Windows no la admite y la desactiva él mismo).
+        // Devuelve true si hay que recolocar las islas.
+        bool FollowAutoHide(Edge edge)
+        {
+            if (!ShellTaskbar.IsHiddenByUs()) return false;
+            bool? live = ShellTaskbar.LiveAutoHide();
+            if (live == null) return false;
+            bool relayout = false;
+            if (ShellTaskbar.IsTrayVisible()) { ShellTaskbar.HideWindow(); relayout = true; }
+            if (live.Value != userAutoHide)
+            {
+                // El usuario la ha cambiado en Configuración: es también el estado que se dejará al salir.
+                userAutoHide = live.Value;
+                ShellTaskbar.SetOriginalAutoHide(userAutoHide);
+            }
+            bool effective = edge == Edge.Bottom && userAutoHide;
+            if (effective != Config.AutoHide) { Config.AutoHide = effective; relayout = true; }
+            return relayout;
+        }
+
+        // "Tamaño de la barra de tareas": las islas toman el grosor que Windows da a su barra (y sus iconos, la misma
+        // proporción). En vertical no se mide: ahí Windows deja su barra igual de ancha con el tamaño pequeño, así que
+        // vale el grosor que corresponde al tamaño elegido (y FitWorkArea quita la franja que sobra).
+        // Devuelve true si hay que recolocar las islas.
+        bool FollowTaskbarSize(Edge edge)
+        {
+            bool vert = edge == Edge.Left || edge == Edge.Right;
+            return Config.SetWinBarHeight(vert ? 0 : ShellTaskbar.Thickness());
+        }
+
+        // Si el usuario mueve la barra de Windows a otro borde, le cambia el tamaño o cambia su ocultación automática,
+        // las islas lo siguen.
         void CheckTaskbarEdge()
         {
             int now = Environment.TickCount;
@@ -744,10 +1157,12 @@ namespace NeuTaskBar
             lastEdgeCheck = now;
             Edge e = Config.ReadTaskbarEdge();
             bool edgeChanged = e != barEdge;
-            bool hideChanged = FollowAutoHide(e, edgeChanged);
-            if (!edgeChanged && !hideChanged) return;
+            bool hideChanged = FollowAutoHide(e);
+            bool sizeChanged = FollowTaskbarSize(e);
+            if (!edgeChanged && !hideChanged && !sizeChanged) return;
             barEdge = e;
-            if (edgeChanged) { flyout.HideNow(); menu.Close(); lastSig = ""; }
+            if (edgeChanged || sizeChanged) { flyout.HideNow(); menu.Close(); }
+            if (edgeChanged) lastSig = "";
             lastBarHeight = -1;
             ApplyLayout();
             UpdateAutoHide();
@@ -766,14 +1181,14 @@ namespace NeuTaskBar
             {
                 islandsHiddenForFullscreen = full;
                 if (full) flyout.HideNow();
-                left.Show(!full);
-                right.Show(!full);
+                ShowIslands(!full);
             }
             else if (!full && !OverflowFlyoutOpen() && !menu.Visible)
             {
-                left.RaiseTopmost();
-                right.RaiseTopmost();
+                RaiseIslands();
             }
+
+            UpdateFill();
 
             string sig;
             var list = tracker.Snapshot(out sig);
@@ -837,8 +1252,8 @@ namespace NeuTaskBar
             IntPtr fg = Native.GetForegroundWindow();
             if (fg == IntPtr.Zero || fg == host || fg == left.Hwnd || fg == right.Hwnd) return false;
             if (!Native.IsWindowVisible(fg) || Native.IsIconic(fg)) return false;
-            // Con ocultación automática una ventana maximizada ocupa toda la pantalla sin ser de pantalla completa.
-            if (Config.AutoHide && Native.IsZoomed(fg)) return false;
+            // Sin franja reservada una ventana maximizada ocupa toda la pantalla sin ser de pantalla completa.
+            if (!barReserved && Native.IsZoomed(fg)) return false;
             string cls = Native.GetClassName(fg);
             if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") return false;
             IntPtr mon = Native.MonitorFromWindow(fg, 2 /* NEAREST */);
@@ -930,7 +1345,10 @@ namespace NeuTaskBar
         void OpenMenu(List<MenuDef> defs, int x, int y)
         {
             flyout.HideNow();
-            menu.Show(defs, x, y, flyout.Anchor);
+            // El menú sale hacia el centro de la pantalla desde la isla en la que se ha pedido.
+            Edge e = right.RestRect.Contains(x, y) ? right.Edge : left.Edge;
+            menu.Edge = e;
+            menu.Show(defs, x, y, AnchorOf(e));
         }
 
         static void Open(string target, string args, string dir)
@@ -943,9 +1361,9 @@ namespace NeuTaskBar
         void ShowTaskbarMenu(int x, int y)
         {
             var l = new List<MenuDef>();
-            l.Add(MenuDef.Item("Administrador de tareas", () => Native.Launch("taskmgr.exe", null),
+            l.Add(MenuDef.Item(L.T("Administrador de tareas"), () => Native.Launch("taskmgr.exe", null),
                 left.Icons.Get(Environment.GetFolderPath(Environment.SpecialFolder.System) + "\\Taskmgr.exe")));
-            l.Add(MenuDef.Item("Configuración de la barra de tareas", () => Native.Launch("ms-settings:taskbar", null), "\uE713"));
+            l.Add(MenuDef.Item(L.T("Configuración de la barra de tareas"), () => Native.Launch("ms-settings:taskbar", null), "\uE713"));
             OpenMenu(l, x, y);
         }
 
@@ -957,7 +1375,7 @@ namespace NeuTaskBar
             foreach (var cat in JumpLists.For(it.ExePath))
             {
                 if (cat.Entries.Count == 0) continue;
-                l.Add(MenuDef.Header(cat.Tasks ? "Tareas" : cat.Name));
+                l.Add(MenuDef.Header(cat.Tasks ? L.T("Tareas") : cat.Name));
                 int shown = 0;
                 foreach (var e in cat.Entries)
                 {
@@ -972,19 +1390,19 @@ namespace NeuTaskBar
             }
             if (l.Count > 0) l.Add(MenuDef.Separator());
 
-            string name = string.IsNullOrEmpty(it.Name) ? "Aplicación" : it.Name;
+            string name = string.IsNullOrEmpty(it.Name) ? L.T("Aplicación") : it.Name;
             if (!string.IsNullOrEmpty(it.LaunchPath)) l.Add(MenuDef.Item(name, () => Native.Launch(it.LaunchPath, null), it.Image));
             if (it.Pinned)
-                l.Add(MenuDef.Item("Desanclar de la barra de tareas", () => { pins.RemoveByPath(it.LaunchPath); lastSig = ""; RefreshApps(); }, "\uE77A"));
+                l.Add(MenuDef.Item(L.T("Desanclar de la barra de tareas"), () => { pins.RemoveByPath(it.LaunchPath); lastSig = ""; RefreshApps(); }, "\uE77A"));
             else if (it.Aumid.Length > 0 || !string.IsNullOrEmpty(it.ExePath))
-                l.Add(MenuDef.Item("Anclar a la barra de tareas", () =>
+                l.Add(MenuDef.Item(L.T("Anclar a la barra de tareas"), () =>
                 {
                     if (it.Packaged) pins.Add(it.LaunchPath, it.Name);
                     else pins.Add(it.ExePath, null);
                     lastSig = ""; RefreshApps();
                 }, "\uE718"));
             if (it.Running && Config.EndTask)
-                l.Add(MenuDef.Item("Finalizar tarea", () =>
+                l.Add(MenuDef.Item(L.T("Finalizar tarea"), () =>
                 {
                     var done = new HashSet<uint>();
                     foreach (var w in it.Windows.ToArray())
@@ -996,7 +1414,7 @@ namespace NeuTaskBar
                     }
                 }, "\uE8BB"));
             if (it.Running)
-                l.Add(MenuDef.Item(it.Windows.Count > 1 ? "Cerrar todas las ventanas" : "Cerrar ventana", () =>
+                l.Add(MenuDef.Item(it.Windows.Count > 1 ? L.T("Cerrar todas las ventanas") : L.T("Cerrar ventana"), () =>
                 {
                     foreach (var w in it.Windows.ToArray()) Native.PostMessageW(w, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
                 }, "\uE711"));
@@ -1006,7 +1424,7 @@ namespace NeuTaskBar
         void ClockContext(int x, int y)
         {
             var l = new List<MenuDef>();
-            l.Add(MenuDef.Item("Ajustar fecha y hora", () => Native.Launch("ms-settings:dateandtime", null), (string)null));
+            l.Add(MenuDef.Item(L.T("Ajustar fecha y hora"), () => Native.Launch("ms-settings:dateandtime", null), (string)null));
             OpenMenu(l, x, y);
         }
 
@@ -1015,13 +1433,13 @@ namespace NeuTaskBar
         {
             var l = new List<MenuDef>();
             int slot = right.LastSysSlot;
-            if (slot == 0) l.Add(MenuDef.Item("Configuración de red e Internet", () => Native.Launch("ms-settings:network", null), (string)null));
+            if (slot == 0) l.Add(MenuDef.Item(L.T("Configuración de red e Internet"), () => Native.Launch("ms-settings:network", null), (string)null));
             else if (slot == 1)
             {
-                l.Add(MenuDef.Item("Abrir el mezclador de volumen", () => Native.Launch("sndvol.exe", null), (string)null));
-                l.Add(MenuDef.Item("Configuración de sonido", () => Native.Launch("ms-settings:sound", null), (string)null));
+                l.Add(MenuDef.Item(L.T("Abrir el mezclador de volumen"), () => Native.Launch("sndvol.exe", null), (string)null));
+                l.Add(MenuDef.Item(L.T("Configuración de sonido"), () => Native.Launch("ms-settings:sound", null), (string)null));
             }
-            else l.Add(MenuDef.Item("Configuración de energía y batería", () => Native.Launch("ms-settings:powersleep", null), (string)null));
+            else l.Add(MenuDef.Item(L.T("Configuración de energía y batería"), () => Native.Launch("ms-settings:powersleep", null), (string)null));
             OpenMenu(l, x, y);
         }
 
@@ -1053,11 +1471,11 @@ namespace NeuTaskBar
         void ShowTrayMenu(int x, int y)
         {
             var l = new List<MenuEntry>();
-            l.Add(new MenuEntry(14, "Abrir NeuTaskBar"));
-            l.Add(new MenuEntry(10, paused ? "Reanudar" : "Pausar (mostrar barra de Windows)"));
-            l.Add(new MenuEntry(11, "Iniciar con Windows", Config.GetAutoStart() ? Native.MF_CHECKED : 0u));
+            l.Add(new MenuEntry(14, L.T("Abrir NeuTaskBar")));
+            l.Add(new MenuEntry(10, paused ? L.T("Reanudar") : L.T("Pausar (mostrar barra de Windows)")));
+            l.Add(new MenuEntry(11, L.T("Iniciar con Windows"), Config.GetAutoStart() ? Native.MF_CHECKED : 0u));
             l.Add(MenuEntry.Separator());
-            l.Add(new MenuEntry(13, "Salir"));
+            l.Add(new MenuEntry(13, L.T("Salir")));
             switch (Track(l, x, y))
             {
                 case 10: if (paused) Resume(); else Pause(); break;
@@ -1086,7 +1504,7 @@ namespace NeuTaskBar
             d.uFlags = Native.NIF_MESSAGE | Native.NIF_ICON | Native.NIF_TIP;
             d.uCallbackMessage = WM_APP_TRAY;
             d.hIcon = trayIcon;
-            d.szTip = paused ? "NeuTaskBar (en pausa)" : "NeuTaskBar";
+            d.szTip = paused ? L.T("NeuTaskBar (en pausa)") : "NeuTaskBar";
             return d;
         }
 

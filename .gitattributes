@@ -1,0 +1,19 @@
+# En el repositorio el texto se guarda con finales de línea LF; al trabajar, CRLF (proyecto solo para Windows).
+* text=auto
+
+*.cs        text eol=crlf diff=csharp
+*.ps1       text eol=crlf
+*.manifest  text eol=crlf
+*.md        text eol=crlf
+*.ini       text eol=crlf
+LICENSE     text eol=crlf
+.gitignore      text eol=crlf
+.gitattributes  text eol=crlf
+.editorconfig   text eol=crlf
+
+# Binarios: sin conversión ni diff de texto
+*.png  binary
+*.ico  binary
+*.exe  binary
+*.dll  binary
+*.zip  binary

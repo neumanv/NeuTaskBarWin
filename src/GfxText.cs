@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
@@ -101,6 +101,11 @@ namespace NeuTaskBar
         }
 
         public static void Clear(IntPtr g, uint argb) { GdipGraphicsClear(g, argb); }
+
+        [DllImport("gdiplus.dll")] static extern int GdipTranslateWorldTransform(IntPtr g, float dx, float dy, int order);
+
+        // Desplaza el origen de lo que se dibuje a partir de ahora.
+        public static void Translate(IntPtr g, float dx, float dy) { GdipTranslateWorldTransform(g, dx, dy, 0 /* prepend */); }
 
         static AlphaSurface measureSurface;
 

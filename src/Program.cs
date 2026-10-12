@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Threading;
 
@@ -6,18 +6,24 @@ namespace NeuTaskBar
 {
     static class Program
     {
-        const string Usage =
-            "NeuTaskBar - barra de tareas de dos islas\r\n\r\n" +
-            "  NeuTaskBar.exe              abre la aplicación\r\n" +
-            "  NeuTaskBar.exe --engine     inicia directamente la barra de tareas (sin ventana)\r\n" +
-            "  NeuTaskBar.exe --quit       cierra la barra de tareas en ejecución\r\n" +
-            "  NeuTaskBar.exe --restore    restaura la barra de tareas original (por si quedó oculta)\r\n" +
-            "  NeuTaskBar.exe --autostart on|off   activa/desactiva el inicio con Windows\r\n";
+        static string Usage
+        {
+            get
+            {
+                return L.T("NeuTaskBar - barra de tareas de dos islas") + "\r\n\r\n" +
+                    "  NeuTaskBar.exe              " + L.T("abre la aplicación") + "\r\n" +
+                    "  NeuTaskBar.exe --engine     " + L.T("inicia directamente la barra de tareas (sin ventana)") + "\r\n" +
+                    "  NeuTaskBar.exe --quit       " + L.T("cierra la barra de tareas en ejecución") + "\r\n" +
+                    "  NeuTaskBar.exe --restore    " + L.T("restaura la barra de tareas original (por si quedó oculta)") + "\r\n" +
+                    "  NeuTaskBar.exe --autostart on|off   " + L.T("activa/desactiva el inicio con Windows") + "\r\n";
+            }
+        }
 
         [STAThread]
         static int Main(string[] args)
         {
             string mode = args.Length > 0 ? args[0].ToLowerInvariant() : "";
+            if (mode == "--engine") Log("arranque del motor (pid " + Process.GetCurrentProcess().Id + ")");
             switch (mode)
             {
                 case "":
@@ -48,9 +54,23 @@ namespace NeuTaskBar
                     Config.SetAutoStart(args.Length > 1 && args[1].Equals("on", StringComparison.OrdinalIgnoreCase));
                     return 0;
                 default:
+                    Config.Load();
                     Native.MessageBoxW(IntPtr.Zero, Usage, "NeuTaskBar", 0x40);
                     return 0;
             }
+        }
+
+        // Registro mínimo para diagnosticar si el inicio con Windows llega a lanzar el motor.
+        static void Log(string text)
+        {
+            try
+            {
+                System.IO.Directory.CreateDirectory(Config.DataDir);
+                string path = System.IO.Path.Combine(Config.DataDir, "startup.log");
+                if (System.IO.File.Exists(path) && new System.IO.FileInfo(path).Length > 20000) System.IO.File.Delete(path);
+                System.IO.File.AppendAllText(path, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + text + Environment.NewLine);
+            }
+            catch { }
         }
 
         static int RunEngine()
@@ -60,19 +80,20 @@ namespace NeuTaskBar
             {
                 if (!created)
                 {
+                    Log("ya había una instancia; se reanuda");
                     // Ya hay una instancia: si está en pausa, la reanuda.
                     IntPtr h = Native.FindWindowW(App.HostClass, null);
                     if (h != IntPtr.Zero) Native.PostMessageW(h, App.WM_APP_RESUME, IntPtr.Zero, IntPtr.Zero);
                     return 0;
                 }
 
-                AppDomain.CurrentDomain.UnhandledException += (s, e) => EmergencyRestore();
+                AppDomain.CurrentDomain.UnhandledException += (s, e) => { Log("excepción no controlada: " + e.ExceptionObject); EmergencyRestore(); };
                 AppDomain.CurrentDomain.ProcessExit += (s, e) => EmergencyRestore();
 
                 StartGuard();
                 Gfx.Init();
                 try { return App.Run(); }
-                finally { EmergencyRestore(); Gfx.Shutdown(); }
+                finally { Log("motor finalizado"); EmergencyRestore(); Gfx.Shutdown(); }
             }
         }
 

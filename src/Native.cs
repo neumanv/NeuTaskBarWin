@@ -126,6 +126,15 @@ namespace NeuTaskBar
     struct WINCOMPATTRDATA { public int Attribute; public IntPtr Data; public int DataSize; }
 
     [StructLayout(LayoutKind.Sequential)]
+    struct DWM_THUMBNAIL_PROPERTIES
+    {
+        public uint dwFlags;
+        public RECT rcDestination, rcSource;
+        public byte opacity;
+        public int fVisible, fSourceClientAreaOnly;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     struct TOOLINFO
     {
         public uint cbSize, uFlags;
@@ -160,6 +169,7 @@ namespace NeuTaskBar
     {
         public const int WS_POPUP = unchecked((int)0x80000000);
         public const int WS_EX_TOPMOST = 0x8, WS_EX_ACCEPTFILES = 0x10, WS_EX_TOOLWINDOW = 0x80,
+            WS_EX_TRANSPARENT = 0x20, WS_EX_LAYERED = 0x80000,
             WS_EX_APPWINDOW = 0x40000, WS_EX_NOACTIVATE = 0x08000000;
         public const int GWL_STYLE = -16, GWL_EXSTYLE = -20, GWLP_USERDATA = -21;
         public const int WS_CHILD = 0x40000000;
@@ -187,11 +197,11 @@ namespace NeuTaskBar
         public const uint WINEVENT_OUTOFCONTEXT = 0, WINEVENT_SKIPOWNPROCESS = 2;
         public const uint EVENT_SYSTEM_FOREGROUND = 0x3, EVENT_SYSTEM_MINIMIZESTART = 0x16, EVENT_SYSTEM_MINIMIZEEND = 0x17,
             EVENT_OBJECT_CREATE = 0x8000, EVENT_OBJECT_DESTROY = 0x8001, EVENT_OBJECT_SHOW = 0x8002, EVENT_OBJECT_HIDE = 0x8003,
-            EVENT_OBJECT_CLOAKED = 0x8017, EVENT_OBJECT_UNCLOAKED = 0x8018;
+            EVENT_OBJECT_LOCATIONCHANGE = 0x800B, EVENT_OBJECT_CLOAKED = 0x8017, EVENT_OBJECT_UNCLOAKED = 0x8018;
         public const int OBJID_WINDOW = 0;
 
         public const uint ABM_NEW = 0, ABM_REMOVE = 1, ABM_QUERYPOS = 2, ABM_SETPOS = 3, ABM_GETSTATE = 4, ABM_SETSTATE = 10;
-        public const uint ABM_GETTASKBARPOS = 5;
+        public const uint ABM_GETTASKBARPOS = 5, ABM_GETAUTOHIDEBAR = 7, ABM_SETAUTOHIDEBAR = 8;
         public const uint ABE_LEFT = 0, ABE_TOP = 1, ABE_RIGHT = 2, ABE_BOTTOM = 3;
         public const int ABS_AUTOHIDE = 1, ABS_ALWAYSONTOP = 2;
         public const int ABN_POSCHANGED = 1, ABN_FULLSCREENAPP = 2;
@@ -238,6 +248,7 @@ namespace NeuTaskBar
         [DllImport("user32.dll")] public static extern IntPtr BeginPaint(IntPtr h, out PAINTSTRUCT ps);
         [DllImport("user32.dll")] public static extern bool EndPaint(IntPtr h, ref PAINTSTRUCT ps);
         [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+        [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
         [DllImport("user32.dll")] public static extern bool InvalidateRect(IntPtr h, IntPtr rect, bool erase);
         [DllImport("user32.dll")] public static extern int FillRect(IntPtr dc, ref RECT r, IntPtr brush);
@@ -280,6 +291,7 @@ namespace NeuTaskBar
         [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
         [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowW(string cls, string title);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, string title);
         [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
         [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(POINT p, uint flags);
         [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
@@ -296,6 +308,10 @@ namespace NeuTaskBar
         [DllImport("user32.dll")] public static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc proc, uint pid, uint tid, uint flags);
         [DllImport("user32.dll")] public static extern bool UnhookWinEvent(IntPtr hook);
         [DllImport("user32.dll")] public static extern int GetSystemMetrics(int idx);
+        public const uint SPI_SETWORKAREA = 0x2F, SPI_GETWORKAREA = 0x30;
+        [DllImport("user32.dll")] public static extern bool SetLayeredWindowAttributes(IntPtr h, uint key, byte alpha, uint flags);
+        [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr h, IntPtr rect, IntPtr rgn, uint flags);
+        [DllImport("user32.dll")] public static extern bool SystemParametersInfoW(uint action, uint param, ref RECT r, uint flags);
 
         // ---- gdi32 ----
         [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr dc);
@@ -342,6 +358,10 @@ namespace NeuTaskBar
         [DllImport("comctl32.dll")] public static extern bool InitCommonControlsEx(ref INITCOMMONCONTROLSEX icc);
         [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int v, int size);
         [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int v, int size);
+        [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT v, int size);
+        [DllImport("dwmapi.dll")] public static extern int DwmRegisterThumbnail(IntPtr dest, IntPtr src, out IntPtr thumb);
+        [DllImport("dwmapi.dll")] public static extern int DwmUnregisterThumbnail(IntPtr thumb);
+        [DllImport("dwmapi.dll")] public static extern int DwmUpdateThumbnailProperties(IntPtr thumb, ref DWM_THUMBNAIL_PROPERTIES p);
         [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr mon, int type, out uint x, out uint y);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandleW(string name);
         [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);

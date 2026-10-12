@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -17,6 +17,7 @@ namespace NeuTaskBar
         [STAThread]
         static int Main(string[] args)
         {
+            Config.Load();   // el idioma elegido en la aplicación
             bool silent = false;
             foreach (var a in args) if (a.Equals("/S", StringComparison.OrdinalIgnoreCase) || a.Equals("--silent", StringComparison.OrdinalIgnoreCase)) silent = true;
 
@@ -27,12 +28,12 @@ namespace NeuTaskBar
             if (!silent)
             {
                 int r = Native.MessageBoxW(IntPtr.Zero,
-                    "¿Quieres desinstalar NeuTaskBar?\r\n\r\nSe detendrá la barra de tareas personalizada, volverá la barra original de Windows y se eliminarán los programas de:\r\n" + dir,
-                    "Desinstalar NeuTaskBar", MB_YESNO | MB_ICONQUESTION);
+                    L.T("¿Quieres desinstalar NeuTaskBar?\r\n\r\nSe detendrá la barra de tareas personalizada, volverá la barra original de Windows y se eliminarán los programas de:\r\n") + dir,
+                    L.T("Desinstalar NeuTaskBar"), MB_YESNO | MB_ICONQUESTION);
                 if (r != IDYES) return 0;
                 int d = Native.MessageBoxW(IntPtr.Zero,
-                    "¿Eliminar también tus ajustes y las aplicaciones fijadas?\r\n\r\n(Si eliges No se conservan por si vuelves a instalarla.)",
-                    "Desinstalar NeuTaskBar", MB_YESNO | MB_ICONQUESTION);
+                    L.T("¿Eliminar también tus ajustes y las aplicaciones fijadas?\r\n\r\n(Si eliges No se conservan por si vuelves a instalarla.)"),
+                    L.T("Desinstalar NeuTaskBar"), MB_YESNO | MB_ICONQUESTION);
                 removeData = d == IDYES;
             }
 
@@ -66,11 +67,11 @@ namespace NeuTaskBar
             if (!silent)
             {
                 if (deleted)
-                    Native.MessageBoxW(IntPtr.Zero, "NeuTaskBar se ha desinstalado correctamente.", "Desinstalar NeuTaskBar", MB_ICONINFORMATION);
+                    Native.MessageBoxW(IntPtr.Zero, L.T("NeuTaskBar se ha desinstalado correctamente."), L.T("Desinstalar NeuTaskBar"), MB_ICONINFORMATION);
                 else
                     Native.MessageBoxW(IntPtr.Zero,
-                        "NeuTaskBar se ha detenido, pero no se pudo borrar NeuTaskBar.exe (está en uso). Bórralo manualmente:\r\n" + mainExe,
-                        "Desinstalar NeuTaskBar", MB_ICONWARNING);
+                        L.T("NeuTaskBar se ha detenido, pero no se pudo borrar NeuTaskBar.exe (está en uso). Bórralo manualmente:\r\n") + mainExe,
+                        L.T("Desinstalar NeuTaskBar"), MB_ICONWARNING);
             }
             return 0;
         }

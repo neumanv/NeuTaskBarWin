@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Runtime.InteropServices;
 
@@ -23,7 +23,7 @@ namespace NeuTaskBar
                 var link = (IShellLinkW)new ShellLinkCom();
                 link.SetPath(exe);
                 link.SetWorkingDirectory(Path.GetDirectoryName(exe));
-                link.SetDescription("Barra de tareas de dos islas");
+                link.SetDescription(L.T("Barra de tareas de dos islas"));
                 link.SetIconLocation(exe, 0);
                 ((IPersistFile)link).Save(lnk, true);
                 Marshal.ReleaseComObject(link);

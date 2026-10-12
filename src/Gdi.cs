@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text;
 
@@ -75,6 +75,15 @@ namespace NeuTaskBar
             Native.GetTextExtentPoint32W(dc, s, s.Length, out sz);
             Native.SelectObject(dc, old);
             return sz.cx;
+        }
+
+        public static int LineHeight(IntPtr dc, IntPtr font)
+        {
+            IntPtr old = Native.SelectObject(dc, font);
+            SIZE sz;
+            Native.GetTextExtentPoint32W(dc, "0", 1, out sz);
+            Native.SelectObject(dc, old);
+            return sz.cy;
         }
 
         public static void FillRound(IntPtr dc, RECT r, int radius, int rgb)

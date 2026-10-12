@@ -1,0 +1,20 @@
+# Estilo común para cualquier editor (https://editorconfig.org)
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# El compilador de C# incluido en Windows y PowerShell 5.1 solo leen bien los acentos si el archivo lleva BOM.
+[*.{cs,ps1}]
+charset = utf-8-bom
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{manifest,yml,yaml,json}]
+indent_size = 2

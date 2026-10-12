@@ -124,6 +124,7 @@ $unSources = @(
     (Join-Path $root 'uninstall\Uninstall.cs'),
     (Join-Path $root 'src\Native.cs'),
     (Join-Path $root 'src\Config.cs'),
+    (Join-Path $root 'src\Lang.cs'),
     (Join-Path $root 'src\ShellTaskbar.cs')
 )
 $unExe = Join-Path $root 'Uninstall.exe'

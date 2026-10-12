@@ -5,15 +5,6 @@ using Microsoft.Win32;
 
 namespace NeuTaskBar
 {
-    [StructLayout(LayoutKind.Sequential)]
-    struct DWM_THUMBNAIL_PROPERTIES
-    {
-        public uint dwFlags;
-        public RECT rcDestination, rcSource;
-        public byte opacity;
-        public int fVisible, fSourceClientAreaOnly;
-    }
-
     // Vista previa de las ventanas de una app al pasar el ratón por su icono (miniaturas en vivo de DWM),
     // con el aspecto del flyout de la barra de tareas de Windows 11 (esquema claro/oscuro del sistema).
     sealed class ThumbFlyout

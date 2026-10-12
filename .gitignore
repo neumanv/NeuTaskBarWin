@@ -1,0 +1,32 @@
+# Resultado de compilar (build.ps1): no se versiona, se publica en Releases
+/NeuTaskBar.exe
+/Uninstall.exe
+*.pdb
+
+# Recursos generados por build.ps1 a partir de assets/logo-source.png
+/assets/logo.png
+/assets/app.ico
+
+# Otras salidas de compilación y empaquetado
+/bin/
+/obj/
+/dist/
+*.zip
+
+# Editores e IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Herramientas locales
+.claude/
+*.log
+*.tmp

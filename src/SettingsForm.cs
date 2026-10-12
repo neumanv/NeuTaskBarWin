@@ -29,6 +29,7 @@ namespace NeuTaskBar
                 }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
+                Config.Load();
                 Config.RegisterUninstall();
                 StartMenu.Create();
                 Application.Run(new MainForm());
@@ -69,6 +70,20 @@ namespace NeuTaskBar
         {
             IntPtr h = Native.FindWindowW(App.HostClass, null);
             if (h != IntPtr.Zero) Native.PostMessageW(h, App.WM_APP_QUIT, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        // Abre o cierra en la barra el modo en el que las islas se arrastran con el ratón.
+        public static void SetMoveMode(bool on)
+        {
+            IntPtr h = Native.FindWindowW(App.HostClass, null);
+            if (h != IntPtr.Zero) Native.PostMessageW(h, App.WM_APP_MOVE, new IntPtr(on ? 1 : 0), IntPtr.Zero);
+        }
+
+        // Avisa a la barra en marcha de que config.ini ha cambiado, para que lo aplique sin reiniciar.
+        public static void ReloadConfig()
+        {
+            IntPtr h = Native.FindWindowW(App.HostClass, null);
+            if (h != IntPtr.Zero) Native.PostMessageW(h, App.WM_APP_CONFIG, IntPtr.Zero, IntPtr.Zero);
         }
     }
 
@@ -145,13 +160,13 @@ namespace NeuTaskBar
                 g.DrawImage(Logo, (W - lw) / 2f, Ui.S(30), lw, lh);
             }
             using (var f = Ui.Font(30, true))
-                Ui.Text(g, "Bienvenido a NeuTaskBar", f, Ui.Ink, new Rectangle(0, Ui.S(146), W, Ui.S(40)),
+                Ui.Text(g, L.T("Bienvenido a NeuTaskBar"), f, Ui.Ink, new Rectangle(0, Ui.S(146), W, Ui.S(40)),
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             using (var f = Ui.Font(15, false))
             {
-                Ui.Text(g, "Personaliza tu barra de tareas de Windows con un diseño de dos islas:", f, Ui.Muted,
+                Ui.Text(g, L.T("Personaliza tu barra de tareas de Windows con un diseño de dos islas:"), f, Ui.Muted,
                     new Rectangle(0, Ui.S(192), W, Ui.S(24)), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-                Ui.Text(g, "tus aplicaciones a la izquierda y el sistema a la derecha.", f, Ui.Muted,
+                Ui.Text(g, L.T("tus aplicaciones a la izquierda y el sistema a la derecha."), f, Ui.Muted,
                     new Rectangle(0, Ui.S(216), W, Ui.S(24)), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             }
             using (var f = Ui.Font(14, false))
@@ -173,7 +188,9 @@ namespace NeuTaskBar
         readonly ToggleSwitch autostart = new ToggleSwitch();
         EngineState state = EngineState.Off;
         bool busy;
+        readonly SegmentedPicker language = new SegmentedPicker(L.Names);
         public event Action ToggleRequested;
+        public event Action LanguageChanged;   // hay que rehacer las páginas: cada una fija sus textos al construirse
 
         public HomePage(Image logo) : base("", "")
         {
@@ -184,7 +201,16 @@ namespace NeuTaskBar
             autostart.Size = new Size(Ui.S(46), Ui.S(24));
             autostart.SetCheckedSilently(Config.GetAutoStart());
             autostart.CheckedChanged += (o, e) => Config.SetAutoStart(autostart.Checked);
-            quick.AddRow(new SettingRow("Iniciar con Windows", "Abre la barra de tareas automáticamente al iniciar sesión", autostart));
+            quick.AddRow(new SettingRow(L.T("Iniciar con Windows"), L.T("Abre la barra de tareas automáticamente al iniciar sesión"), autostart));
+            language.Selected = L.Index;
+            language.SelectedChanged += i =>
+            {
+                L.Set(L.Codes[i]);
+                Config.Save("lang", L.Codes[i]);
+                Engine.ReloadConfig();
+                if (LanguageChanged != null) LanguageChanged();
+            };
+            quick.AddRow(new SettingRow(L.T("Idioma"), L.T("Idioma de la aplicación y de la barra de tareas."), language));
             Controls.Add(quick);
         }
 
@@ -194,9 +220,9 @@ namespace NeuTaskBar
             busy = b;
             var btn = hero.Button;
             if (b) { btn.Text = busyText; btn.Mode = PillMode.Busy; hero.Status = busyText.TrimEnd('.') + "…"; hero.StatusColor = Color.FromArgb(230, 160, 30); }
-            else if (s == EngineState.On) { btn.Text = "Desactivar barra de tareas"; btn.Mode = PillMode.Outline; hero.Status = "Barra de tareas activa"; hero.StatusColor = Color.FromArgb(46, 158, 91); }
-            else if (s == EngineState.Paused) { btn.Text = "Activar barra de tareas"; btn.Mode = PillMode.Primary; hero.Status = "En pausa: se muestra la barra de Windows"; hero.StatusColor = Color.FromArgb(230, 160, 30); }
-            else { btn.Text = "Activar barra de tareas"; btn.Mode = PillMode.Primary; hero.Status = "Barra de tareas desactivada"; hero.StatusColor = Color.FromArgb(140, 140, 146); }
+            else if (s == EngineState.On) { btn.Text = L.T("Desactivar barra de tareas"); btn.Mode = PillMode.Outline; hero.Status = L.T("Barra de tareas activa"); hero.StatusColor = Color.FromArgb(46, 158, 91); }
+            else if (s == EngineState.Paused) { btn.Text = L.T("Activar barra de tareas"); btn.Mode = PillMode.Primary; hero.Status = L.T("En pausa: se muestra la barra de Windows"); hero.StatusColor = Color.FromArgb(230, 160, 30); }
+            else { btn.Text = L.T("Activar barra de tareas"); btn.Mode = PillMode.Primary; hero.Status = L.T("Barra de tareas desactivada"); hero.StatusColor = Color.FromArgb(140, 140, 146); }
             hero.Invalidate();
         }
 
@@ -210,15 +236,139 @@ namespace NeuTaskBar
         }
     }
 
-    // Apariencia: aquí irán las opciones visuales de las islas.
+    // Apariencia: opciones visuales de las islas.
     sealed class AppearancePage : Page
     {
+        readonly Card hide = new Card();
+        readonly Card colors = new Card();
         readonly Card card = new Card();
 
-        public AppearancePage() : base("Apariencia", "Personaliza cómo se ven las islas de la barra de tareas.")
+        public AppearancePage() : base(L.T("Apariencia"), L.T("Personaliza cómo se ven las islas de la barra de tareas."))
         {
-            card.AddRow(new SettingRow("Ajustes de la barra", "La posición, la alineación, los botones, las etiquetas, el reloj y la ocultación automática siguen lo que elijas en Configuración > Personalización > Barra de tareas.", null));
+            hide.AddRow(new SettingRow(L.T("Ocultar la isla de aplicaciones"), L.T("Inicio y tus apps. Vuelve al pasar el ratón por su sitio."),
+                HideSwitch("hideleft", Config.HideLeft, on => Config.HideLeft = on)));
+            hide.AddRow(new SettingRow(L.T("Ocultar la isla de información"), L.T("Red, volumen, batería y reloj. Vuelve al pasar el ratón por su sitio."),
+                HideSwitch("hideright", Config.HideRight, on => Config.HideRight = on)));
+            Controls.Add(hide);
+
+            colors.AddRow(new SettingRow(L.T("Color de la isla de aplicaciones"), L.T("Un color, transparente o el que tú elijas."),
+                ColorPicker("tintleft", Config.TintLeft, c => Config.TintLeft = c)));
+            colors.AddRow(new SettingRow(L.T("Color de la isla de información"), L.T("Un color, transparente o el que tú elijas."),
+                ColorPicker("tintright", Config.TintRight, c => Config.TintRight = c)));
+            Controls.Add(colors);
+
+            card.AddRow(new SettingRow(L.T("Ajustes de la barra"), L.T("La posición, la alineación, los botones, las etiquetas, el reloj y la ocultación automática siguen lo que elijas en Configuración > Personalización > Barra de tareas."), null));
             Controls.Add(card);
+        }
+
+        // Interruptor que guarda su valor en config.ini y lo aplica a la barra en marcha.
+        static ToggleSwitch HideSwitch(string key, bool value, Action<bool> set)
+        {
+            var sw = new ToggleSwitch();
+            sw.Size = new Size(Ui.S(46), Ui.S(24));
+            sw.SetCheckedSilently(value);
+            sw.CheckedChanged += (o, e) =>
+            {
+                set(sw.Checked);
+                Config.Save(key, sw.Checked ? "1" : "0");
+                Engine.ReloadConfig();
+            };
+            return sw;
+        }
+
+        // Selector de color que guarda su valor (AARRGGBB) en config.ini y lo aplica a la barra en marcha.
+        static SwatchPicker ColorPicker(string key, uint value, Action<uint> set)
+        {
+            var picker = new SwatchPicker();
+            picker.Value = value;
+            picker.ValueChanged += c =>
+            {
+                set(c);
+                Config.Save(key, c.ToString("X8"));
+                Engine.ReloadConfig();
+            };
+            return picker;
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            int y = HeaderHeight;
+            hide.SetBounds(ContentLeft, y, ContentWidth, hide.PreferredHeight);
+            y += hide.PreferredHeight + Ui.S(16);
+            colors.SetBounds(ContentLeft, y, ContentWidth, colors.PreferredHeight);
+            y += colors.PreferredHeight + Ui.S(16);
+            card.SetBounds(ContentLeft, y, ContentWidth, card.PreferredHeight);
+        }
+    }
+
+    // Posición: unir las islas en una sola barra y llevarlas a otra esquina de la pantalla.
+    sealed class PositionPage : Page
+    {
+        readonly Card card = new Card();
+        readonly ToggleSwitch join = new ToggleSwitch();
+        readonly PillButton move = new PillButton(), reset = new PillButton();
+        readonly SettingRow moveRow;
+        bool moving, engineOn;
+
+        public PositionPage() : base(L.T("Posición"), L.T("Elige dónde van las islas de la barra de tareas."))
+        {
+            join.Size = new Size(Ui.S(46), Ui.S(24));
+            join.SetCheckedSilently(Config.Join);
+            join.CheckedChanged += (o, e) =>
+            {
+                Config.Join = join.Checked;
+                Config.Save("join", join.Checked ? "1" : "0");
+                Engine.ReloadConfig();
+            };
+            card.AddRow(new SettingRow(L.T("Unir las islas"), L.T("Forman una sola barra, con el color de la isla de aplicaciones."), join));
+
+            move.FontPx = reset.FontPx = 14;
+            move.Size = reset.Size = new Size(Ui.S(120), Ui.S(36));
+            move.Click += (o, e) => SetMoving(!moving);
+            moveRow = new SettingRow(L.T("Mover las islas"), "", move);
+            card.AddRow(moveRow);
+
+            reset.Text = L.T("Restablecer");
+            reset.Mode = PillMode.Outline;
+            reset.Click += (o, e) =>
+            {
+                Config.CornerLeft = Config.CornerRight = -1;
+                Config.Save("cornerleft", "");
+                Config.Save("cornerright", "");
+                Engine.ReloadConfig();
+            };
+            card.AddRow(new SettingRow(L.T("Volver a su sitio"), L.T("Las islas vuelven a donde manda la barra de tareas de Windows."), reset));
+            Controls.Add(card);
+            ShowMoveState();
+        }
+
+        // Mover es temporal: las islas solo se dejan arrastrar desde que se pulsa "Mover" hasta que se confirma.
+        void SetMoving(bool on)
+        {
+            if (on && !engineOn) return;
+            moving = on;
+            Engine.SetMoveMode(on);
+            ShowMoveState();
+        }
+
+        void ShowMoveState()
+        {
+            move.Text = moving ? L.T("Confirmar") : L.T("Mover");
+            move.Mode = moving ? PillMode.Primary : engineOn ? PillMode.Outline : PillMode.Busy;
+            moveRow.Description = moving ? L.T("Arrastra cada isla a una esquina libre y pulsa Confirmar.")
+                : engineOn ? L.T("Pulsa Mover para poder arrastrarlas a otra esquina de la pantalla.")
+                : L.T("Activa la barra de tareas para poder moverlas.");
+            moveRow.Invalidate();
+        }
+
+        public override void UpdateEngine(EngineState state, bool busy, string busyText)
+        {
+            bool on = state == EngineState.On && !busy;
+            if (on == engineOn) return;
+            engineOn = on;
+            if (!on) moving = false;   // la barra sale sola del modo mover al pausarse o cerrarse
+            ShowMoveState();
         }
 
         protected override void OnLayout(LayoutEventArgs e)
@@ -228,26 +378,28 @@ namespace NeuTaskBar
         }
     }
 
-    // Acerca de: versión, carpeta de instalación y desinstalación.
+    // Acerca de: enlace al repositorio, carpeta de instalación y desinstalación.
     sealed class AboutPage : Page
     {
+        const string RepoUrl = "https://github.com/neumanv/NeuTaskBarWin";
         readonly Card card = new Card();
 
-        public AboutPage() : base("Acerca de", "Información sobre NeuTaskBar.")
+        public AboutPage() : base(L.T("Acerca de"), L.T("Información sobre NeuTaskBar."))
         {
-            card.AddRow(new SettingRow("NeuTaskBar", "Versión 1.0", null));
+            card.AddRow(new SettingRow(L.T("Acceder al repositorio"), RepoUrl.Substring(8), null)
+                .Link((g, r) => Ui.GitHubMark(g, r, Ui.Ink), () => { try { Process.Start(RepoUrl); } catch { } }));
 
-            var open = SmallButton("Abrir", PillMode.Outline);
+            var open = SmallButton(L.T("Abrir"), PillMode.Outline);
             open.Click += (o, e) => { try { Process.Start("explorer.exe", "\"" + Config.InstallDir + "\""); } catch { } };
-            card.AddRow(new SettingRow("Carpeta de instalación", Config.InstallDir, open));
+            card.AddRow(new SettingRow(L.T("Carpeta de instalación"), Config.InstallDir, open));
 
-            var uninstall = SmallButton("Desinstalar", PillMode.Outline);
+            var uninstall = SmallButton(L.T("Desinstalar"), PillMode.Outline);
             uninstall.Click += (o, e) =>
             {
                 string un = Path.Combine(Config.InstallDir, "Uninstall.exe");
                 if (File.Exists(un)) { try { Process.Start(un); } catch { } }
             };
-            card.AddRow(new SettingRow("Desinstalar NeuTaskBar", "Quita la aplicación y devuelve la barra de tareas original de Windows", uninstall));
+            card.AddRow(new SettingRow(L.T("Desinstalar NeuTaskBar"), L.T("Quita la aplicación y devuelve la barra de tareas original de Windows"), uninstall));
             Controls.Add(card);
         }
 
@@ -275,7 +427,7 @@ namespace NeuTaskBar
         readonly Panel host = new Panel();
         readonly List<Page> pages = new List<Page>();
         readonly System.Windows.Forms.Timer poll = new System.Windows.Forms.Timer();
-        readonly HomePage home;
+        HomePage home;
         Image logo;
         EngineState state = EngineState.Off;
         bool busy;
@@ -319,12 +471,7 @@ namespace NeuTaskBar
             Controls.Add(host);
             Controls.Add(nav);
 
-            home = new HomePage(logo);
-            home.ToggleRequested += OnToggle;
-            AddPage("Inicio", "", home);
-            AddPage("Apariencia", "", new AppearancePage());
-            AddPage("Acerca de", "", new AboutPage());
-            ShowPage(0);
+            BuildPages();
 
             poll.Interval = 700;
             poll.Tick += (o, e) => RefreshState();
@@ -332,6 +479,27 @@ namespace NeuTaskBar
 
             ApplyScale();
             RefreshState();
+        }
+
+        // Crea las páginas; se rehacen al cambiar de idioma, porque cada una fija sus textos al construirse.
+        void BuildPages()
+        {
+            int selected = pages.Count > 0 ? nav.Selected : 0;
+            if (pages.Count > 0) Engine.SetMoveMode(false);
+            foreach (var p in pages) { host.Controls.Remove(p); p.Dispose(); }
+            pages.Clear();
+            nav.Titles.Clear();
+            nav.Glyphs.Clear();
+            home = new HomePage(logo);
+            home.ToggleRequested += OnToggle;
+            AddPage(L.T("Inicio|home"), "", home);
+            AddPage(L.T("Apariencia"), "", new AppearancePage());
+            AddPage(L.T("Posición"), "\uE7C2", new PositionPage());
+            AddPage(L.T("Acerca de"), "", new AboutPage());
+            home.LanguageChanged += () => BeginInvoke((Action)BuildPages);
+            ShowPage(selected);
+            foreach (var p in pages) p.PerformLayout();
+            Publish();
         }
 
         // Añade una página a la navegación lateral.
@@ -392,13 +560,14 @@ namespace NeuTaskBar
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            Engine.SetMoveMode(false);   // cerrar la ventana confirma: las islas no se quedan sueltas
             Native.RemovePropW(Handle, Native.MainWindowProp);
             base.OnFormClosed(e);
         }
 
         void ApplyScale()
         {
-            MinimumSize = SizeFromClientSize(new Size(Ui.S(820), Ui.S(560)));
+            MinimumSize = SizeFromClientSize(new Size(Ui.S(820), Ui.S(600)));
             if (ClientSize.Width < Ui.S(980) && !Visible) ClientSize = new Size(Ui.S(980), Ui.S(660));
             nav.Width = Ui.S(240);
             foreach (var p in pages) p.PerformLayout();
@@ -413,9 +582,9 @@ namespace NeuTaskBar
             busyUntil = DateTime.UtcNow.AddSeconds(8);
             switch (state)
             {
-                case EngineState.Off: busyText = "Activando..."; Engine.Start(); break;
-                case EngineState.Paused: busyText = "Activando..."; Engine.Resume(); break;
-                default: busyText = "Desactivando..."; Engine.Stop(); break;
+                case EngineState.Off: busyText = L.T("Activando..."); Engine.Start(); break;
+                case EngineState.Paused: busyText = L.T("Activando..."); Engine.Resume(); break;
+                default: busyText = L.T("Desactivando..."); Engine.Stop(); break;
             }
             Publish();
         }
@@ -430,11 +599,6 @@ namespace NeuTaskBar
         void Publish()
         {
             foreach (var p in pages) p.UpdateEngine(state, busy, busyText);
-            if (busy) { nav.StatusText = busyText.TrimEnd('.') + "…"; nav.StatusColor = Color.FromArgb(230, 160, 30); }
-            else if (state == EngineState.On) { nav.StatusText = "Barra de tareas activa"; nav.StatusColor = Color.FromArgb(46, 158, 91); }
-            else if (state == EngineState.Paused) { nav.StatusText = "En pausa"; nav.StatusColor = Color.FromArgb(230, 160, 30); }
-            else { nav.StatusText = "Barra de tareas desactivada"; nav.StatusColor = Color.FromArgb(140, 140, 146); }
-            nav.Invalidate();
         }
 
         protected override void Dispose(bool disposing)

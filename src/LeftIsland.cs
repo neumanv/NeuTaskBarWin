@@ -76,12 +76,13 @@ namespace NeuTaskBar
 
         static string ToolName(string id)
         {
-            return id == "search" ? "Buscar" : id == "taskview" ? "Vista de tareas" : "Widgets";
+            return id == "search" ? L.T("Buscar") : id == "taskview" ? L.T("Vista de tareas") : "Widgets";
         }
 
         string TipText(int idx)
         {
-            if (idx == 0) return "Inicio";
+            if (Movable) return "";   // mientras se mueven las islas no hay nada que explicar
+            if (idx == 0) return L.T("Inicio|start");
             idx--;
             if (idx < tools.Count) return ToolName(tools[idx].Id);
             idx -= tools.Count;
@@ -149,7 +150,7 @@ namespace NeuTaskBar
         public override void Layout() { LayoutInternal(true); }
 
         // Ancho normal de una celda de app y de una celda con etiqueta (px).
-        float NormalCellW { get { return S(Config.Height) - S(8); } }
+        float NormalCellW { get { return BarH - Inset * 2; } }
         float SmallCellW { get { return Math.Min(NormalCellW, S(32)); } }
 
         // Ancho de la celda de Buscar según el modo elegido en Windows (en barras verticales, siempre solo icono).
@@ -184,9 +185,9 @@ namespace NeuTaskBar
 
         void LayoutInternal(bool snap)
         {
-            float h = S(Config.Height);
+            float h = BarH;
             float pad = S(6), gap = S(2), sep = S(12);
-            cellH = h - S(8);
+            cellH = h - Inset * 2;
             startW = cellH;
             int n = 0, nLab = 0;
             foreach (var c in cells) if (!c.Dying) { n++; if (HasLabel(c) && !Vert) nLab++; }
@@ -259,8 +260,8 @@ namespace NeuTaskBar
         {
             var it = c.Item;
             if (it == null) return 0f;
-            if (it.Active || it.Flashing) return S(16);
-            return it.Windows.Count > 1 ? S(10) : S(6);
+            if (it.Active || it.Flashing) return S(16) * Shrink;
+            return (it.Windows.Count > 1 ? S(10) : S(6)) * Shrink;
         }
 
         void RebuildTips()
@@ -280,7 +281,7 @@ namespace NeuTaskBar
         // Rectángulo de una celda (u, ancho a lo largo de la isla) en coordenadas de cliente de la ventana.
         RECT ClientRect(float u, float du)
         {
-            RECT r = MapRectI(u, S(4), du, cellH);
+            RECT r = MapRectI(u, Inset, du, cellH);
             return new RECT(r.Left + ovL, r.Top + ovT, r.Right + ovL, r.Bottom + ovT);
         }
 
@@ -356,7 +357,7 @@ namespace NeuTaskBar
         {
             int x, y;
             Unmap(px, py, out x, out y);
-            if (y < S(4) || y >= S(4) + cellH) return null;
+            if (y < Inset || y >= Inset + cellH) return null;
             if (x >= start.X.V && x < start.X.V + start.W.V) return start;
             foreach (var t in tools)
                 if (x >= t.X.V && x < t.X.V + t.W.V) return t;
@@ -461,6 +462,8 @@ namespace NeuTaskBar
             return new RECT(w.Left + r.Left, w.Top + r.Top, w.Left + r.Right, w.Top + r.Bottom);
         }
 
+        protected override void HideTip() { if (tip != null) tip.Hide(); }
+
         protected override void OnMouseLeave()
         {
             if (hoverCell != null) hoverCell.Hover.T = 0f;
@@ -561,18 +564,22 @@ namespace NeuTaskBar
 
         protected override void OnPaintContent(IntPtr dc)
         {
-            float top = S(4);
+            float top = Inset;
             float radius = S(6);
+            float shrink = Shrink;
             var fallbacks = new List<Fallback>();
             var labels = new List<Fallback>();
-            IntPtr g = Gfx.Begin(dc);
+            IntPtr g = BeginGfx();
 
             DrawStart(g, top, radius);
             var glyphs = new List<Fallback>();
             foreach (var t in tools) DrawTool(g, t, top, radius, glyphs, labels);
 
             if (cells.Count > 0)
-                FillRectL(g, sepX, S(14), Math.Max(1, S(1) * 0.9f), S(Config.Height) - S(28), Gfx.Argb(0.22f, 255, 255, 255));
+            {
+                float sepInset = S(14) * shrink;
+                FillRectL(g, sepX, sepInset, Math.Max(1, S(1) * 0.9f), BarH - sepInset * 2, Veil(0.22f));
+            }
 
             float px = Icons.Px;
             long now = Stopwatch.GetTimestamp();
@@ -588,7 +595,7 @@ namespace NeuTaskBar
                 float box = c.X.V;
 
                 float fill = Math.Max(c.Active.V * 0.11f, c.Hover.V * 0.16f) * (1f - 0.45f * c.Press.V);
-                FillRoundL(g, box, top, cw, cellH, radius, Gfx.Argb(fill * appear, 255, 255, 255));
+                FillRoundL(g, box, top, cw, cellH, radius, Veil(fill * appear));
 
                 float scale = (0.55f + 0.45f * ease) * (1f - 0.14f * c.Press.V);
                 float size = px * scale;
@@ -608,12 +615,12 @@ namespace NeuTaskBar
                 {
                     double t = (now - c.LaunchStart) / (double)Stopwatch.Frequency;
                     double p = (t % 0.9) / 0.9;
-                    iy += away * (float)(4.0 * p * (1.0 - p)) * S(9);
+                    iy += away * (float)(4.0 * p * (1.0 - p)) * S(9) * shrink;
                 }
                 if (it != null && it.Image != null) ImageL(g, it.Image, ix, iy, size, ease);
                 else if (appear > 0.4f)
                 {
-                    FillRoundL(g, ix, iy, size, size, S(5), Gfx.Argb(0.27f * ease, 255, 255, 255));
+                    FillRoundL(g, ix, iy, size, size, S(5), Veil(0.27f * ease));
                     fallbacks.Add(new Fallback { R = MapRectI(ix, iy, size, size), Name = it == null ? "" : it.Name });
                 }
 
@@ -624,7 +631,7 @@ namespace NeuTaskBar
                     float bx = box + (iconSlot - bw) / 2f;
                     float by = EdgeFar ? top + cellH - bh - S(2) : top + S(2);
                     float a = c.Active.V;
-                    int r = (int)(150 + (76 - 150) * a), gg = (int)(150 + (194 - 150) * a), b = (int)(150 + (255 - 150) * a);
+                    int r = (int)(150 + (AccentR - 150) * a), gg = (int)(150 + (AccentG - 150) * a), b = (int)(150 + (AccentB - 150) * a);
                     if (it.Flashing) { r = 255; gg = 176; b = 0; }
                     FillRoundL(g, bx, by, bw, bh, bh / 2f, Gfx.Argb(c.IndOn.V * appear, r, gg, b));
                 }
@@ -632,15 +639,15 @@ namespace NeuTaskBar
             Gfx.End(g);
 
             foreach (var f in glyphs)
-                Gdi.Text(dc, f.Name, f.R, Gdi.Font(IsWin11 ? "Segoe Fluent Icons" : "Segoe MDL2 Assets", (int)S(16), 400), Native.Rgb(255, 255, 255), Gdi.DT_CENTER | Gdi.DT_VCENTER);
+                Text(f.Name, f.R, Gdi.Font(IsWin11 ? "Segoe Fluent Icons" : "Segoe MDL2 Assets", (int)Math.Round(S(16) * shrink), 400), Ink(255), Gdi.DT_CENTER | Gdi.DT_VCENTER);
 
             foreach (var f in labels)
-                Gdi.Text(dc, f.Name, f.R, Gdi.Font("Segoe UI", S(12), 400), Native.Rgb(245, 245, 245), Gdi.DT_VCENTER | Gdi.DT_END_ELLIPSIS);
+                Text(f.Name, f.R, Gdi.Font("Segoe UI", S(12), 400), Ink(245), Gdi.DT_VCENTER | Gdi.DT_END_ELLIPSIS);
 
             foreach (var f in fallbacks)
             {
                 string letter = string.IsNullOrEmpty(f.Name) ? "?" : f.Name.Substring(0, 1).ToUpperInvariant();
-                Gdi.Text(dc, letter, f.R, Gdi.Font("Segoe UI", S(14), 600), Native.Rgb(240, 240, 240), Gdi.DT_CENTER | Gdi.DT_VCENTER);
+                Text(letter, f.R, Gdi.Font("Segoe UI", (int)Math.Round(S(14) * shrink), 600), Ink(240), Gdi.DT_CENTER | Gdi.DT_VCENTER);
             }
         }
 
@@ -654,24 +661,24 @@ namespace NeuTaskBar
             {
                 // Buscar como cuadro (píldora siempre visible) o como icono con etiqueta.
                 bool boxed = SearchMode == 2;
-                float inset = boxed ? S(4) : 0f;
+                float inset = boxed ? S(4) * Shrink : 0f;
                 float baseFill = boxed ? 0.10f : 0f;
                 Gfx.FillRound(g, pr.Left, pr.Top + inset, pr.Width, pr.Height - inset * 2, boxed ? (pr.Height - inset * 2) / 2f : radius,
-                    Gfx.Argb(Math.Max(baseFill, fill + baseFill * 0.5f), 255, 255, 255));
+                    Veil(Math.Max(baseFill, fill + baseFill * 0.5f)));
                 int gw = (int)Math.Min(cellH, S(40));
                 glyphs.Add(new Fallback { R = new RECT(pr.Left, pr.Top, pr.Left + gw, pr.Bottom), Name = "\uE721" });
-                labels.Add(new Fallback { R = new RECT(pr.Left + gw - S(2), pr.Top, pr.Right - S(8), pr.Bottom), Name = "Buscar" });
+                labels.Add(new Fallback { R = new RECT(pr.Left + gw - S(2), pr.Top, pr.Right - S(8), pr.Bottom), Name = L.T("Buscar") });
                 return;
             }
-            FillRoundL(g, x, top, w, cellH, radius, Gfx.Argb(fill, 255, 255, 255));
+            FillRoundL(g, x, top, w, cellH, radius, Veil(fill));
             if (c.Id == "widgets")
             {
-                float u = S(7) * scale, gp = Math.Max(1f, S(2)) * scale;
+                float u = S(7) * Shrink * scale, gp = Math.Max(1f, S(2) * Shrink) * scale;
                 float x0 = pr.Left + (pr.Width - (u * 2 + gp)) / 2f, y0 = pr.Top + (pr.Height - (u * 2 + gp)) / 2f;
-                uint col = Gfx.Argb(1f, 76, 194, 255);
+                uint col = Accent(1f);
                 Gfx.FillRound(g, x0, y0, u, u * 2 + gp, S(2), col);
                 Gfx.FillRound(g, x0 + u + gp, y0, u, u, S(2), col);
-                Gfx.FillRound(g, x0 + u + gp, y0 + u + gp, u, u, S(2), Gfx.Argb(0.8f, 255, 255, 255));
+                Gfx.FillRound(g, x0 + u + gp, y0 + u + gp, u, u, S(2), Veil(0.8f));
             }
             else
             {
@@ -683,14 +690,14 @@ namespace NeuTaskBar
         {
             float x = start.X.V, w = start.W.V;
             float fill = start.Hover.V * 0.16f * (1f - 0.45f * start.Press.V);
-            FillRoundL(g, x, top, w, cellH, radius, Gfx.Argb(fill, 255, 255, 255));
+            FillRoundL(g, x, top, w, cellH, radius, Veil(fill));
 
             float scale = 1f - 0.12f * start.Press.V;
-            float sq = S(8) * scale, gp = Math.Max(1f, S(2)) * scale;
+            float sq = S(8) * Shrink * scale, gp = Math.Max(1f, S(2) * Shrink) * scale;
             float total = sq * 2 + gp;
             RECT pr = MapRectI(x, top, w, cellH);
             float x0 = pr.Left + (pr.Width - total) / 2f, y0 = pr.Top + (pr.Height - total) / 2f;
-            uint col = Gfx.Argb(1f, 76, 194, 255);
+            uint col = Accent(1f);
             for (int cx = 0; cx < 2; cx++)
                 for (int cy = 0; cy < 2; cy++)
                     Gfx.FillRound(g, x0 + cx * (sq + gp), y0 + cy * (sq + gp), sq, sq, S(1), col);
