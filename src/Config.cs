@@ -123,16 +123,94 @@ namespace NeuTaskBar
 
         // Posición: las dos islas unidas en una sola barra, y la esquina de pantalla elegida para cada una
         // (-1 = donde manda la barra de Windows; 0 arriba-izquierda, 1 arriba-derecha, 2 abajo-izquierda, 3 abajo-derecha).
+        // La de aplicaciones admite además el centro: 4 arriba, 5 abajo.
         public static bool Join;
+        // Una sola barra de lado a lado del borde, como la de Windows, en vez de dos islas (manda sobre Join y las esquinas).
+        public static bool FullBar;
+        // Las dos islas forman una sola pieza: unidas o en la barra completa.
+        public static bool OneBar { get { return Join || FullBar; } }
         public static int CornerLeft = -1, CornerRight = -1;
-        static readonly string[] CornerNames = { "tl", "tr", "bl", "br" };
+        public const int CornerCount = 4, SpotCount = 6;
+        static readonly string[] CornerNames = { "tl", "tr", "bl", "br", "tc", "bc" };
 
-        public static string CornerName(int corner) { return corner >= 0 && corner < 4 ? CornerNames[corner] : ""; }
+        public static string CornerName(int corner) { return corner >= 0 && corner < SpotCount ? CornerNames[corner] : ""; }
 
         static int ParseCorner(string val)
         {
             return val.Length < 2 ? -1 : Array.IndexOf(CornerNames, val.Substring(0, 2).ToLowerInvariant());
         }
+
+        // ---- Personalización propia (config.ini). Aspecto de las dos islas:
+        public const uint LightTint = 0xCCF3F3F3;
+        public static int Opacity = -1;          // opacidad del color de las islas, 0-100 (-1 = la del propio color)
+        public static uint AccentColor;          // color de énfasis RRGGBB (0 = el predeterminado)
+        public static bool AccentWindows;        // usar el color de énfasis de Windows
+        public static bool AutoTheme;            // islas claras u oscuras según el modo de Windows
+        public static int FillMode;              // hueco entre las islas bajo una ventana maximizada: 0 sigue a la ventana, 1 color de las islas
+        public static bool Border;               // contorno fino alrededor de las islas
+        public static int InkMode;               // tinta del contenido: 0 automática, 1 clara, 2 oscura
+        public static int TextSize = 12;         // tamaño del texto (reloj y etiquetas) a 96 dpi
+        public static bool ReduceMotion;         // sin animaciones
+        public static bool CalmOnBattery;        // sin animaciones mientras el equipo va con batería
+        // Isla de aplicaciones:
+        public static int IconGap = 2;           // separación entre iconos a 96 dpi
+        public static int Indicator;             // marca de app abierta: 0 línea, 1 punto, 2 ninguna
+        public static bool MonoIcons;            // iconos en escala de grises
+        public static int HoverEffect;           // al pasar el ratón: 0 resaltar la celda, 1 ampliar el icono, 2 nada
+        public static bool LaunchBounce = true;  // rebote del icono mientras se abre una app
+        public static bool HideStart;            // sin botón de Inicio
+        public static int MinWidth;              // anchura mínima de la isla a 96 dpi (0 = la justa)
+        public static int MiddleClick;           // clic central: 0 abre otra ventana, 1 cierra la ventana
+        public static int WheelAction;           // rueda sobre una app: 0 nada, 1 pasa de una ventana a otra
+        public static bool Previews = true;      // vistas previas de las ventanas al pasar el ratón
+        public static string[] HiddenApps = new string[0];   // apps que no se muestran aunque estén abiertas
+        // Isla de información:
+        public static bool ShowNet = true, ShowVolume = true, ShowBattery = true;
+        public static bool BatteryPercent;       // porcentaje junto al icono de la batería
+        public static int ClockTime;             // hora: 0 formato de Windows, 1 24 horas, 2 12 horas
+        public static int ClockDate;             // fecha: 0 corta, 1 día de la semana y fecha, 2 sin fecha
+        public static bool ShowCpu, ShowRam;     // uso del procesador y de la memoria
+        public static bool ShowMedia;            // botones de anterior, reproducir/pausa y siguiente
+        public static bool Notices;              // avisos breves en el sitio del reloj (volumen, batería)
+        // Comportamiento:
+        public static int HideDelay = 450;       // ms que tarda en esconderse una isla al dejarla
+
+        // Lo que se sigue del tema de Windows: modo claro u oscuro de la barra y color de énfasis (RRGGBB, 0 = desconocido).
+        public static bool WinLight;
+        public static uint WinAccent;
+
+        // Devuelve true si algo cambió.
+        public static bool ReadWindowsTheme()
+        {
+            bool light = ReadDword(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "SystemUsesLightTheme", 0) != 0;
+            int abgr = ReadDword(@"Software\Microsoft\Windows\DWM", "AccentColor", 0);
+            uint accent = abgr == 0 ? 0 : (uint)(((abgr & 0xFF) << 16) | (abgr & 0xFF00) | ((abgr >> 16) & 0xFF));
+            bool changed = light != WinLight || accent != WinAccent;
+            WinLight = light;
+            WinAccent = accent;
+            return changed;
+        }
+
+        // Color de énfasis elegido (RRGGBB); 0 = el predeterminado de cada tinta.
+        public static uint Accent { get { return AccentWindows && WinAccent != 0 ? WinAccent : AccentWindows ? 0 : AccentColor; } }
+
+        // Color con el que se pinta una isla a partir del elegido para ella: el del tema de Windows si se sigue, y con
+        // la opacidad común si se ha fijado una (la isla transparente del todo no cambia).
+        public static uint IslandTint(uint chosen)
+        {
+            uint t = AutoTheme ? (WinLight ? LightTint : DefaultTint) : chosen;
+            if ((t >> 24) == 0 || Opacity < 0) return t;
+            return ((uint)Math.Max(1, Opacity * 255 / 100) << 24) | (t & 0xFFFFFF);
+        }
+
+        // Identidad de una app para ocultarla de la barra: su AppUserModelID o, si no lo declara, el nombre de su exe.
+        public static string AppId(string aumid, string exePath)
+        {
+            if (!string.IsNullOrEmpty(aumid)) return aumid.ToLowerInvariant();
+            return string.IsNullOrEmpty(exePath) ? "" : Path.GetFileName(exePath).ToLowerInvariant();
+        }
+
+        public static bool IsHiddenApp(string id) { return id.Length > 0 && Array.IndexOf(HiddenApps, id) >= 0; }
 
         const string AdvKey = @"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced";
 
@@ -185,9 +263,19 @@ namespace NeuTaskBar
 
         public static void Load()
         {
-            HideLeft = HideRight = Join = false;
+            HideLeft = HideRight = Join = FullBar = false;
             CornerLeft = CornerRight = -1;
             Tint = DefaultTint;
+            Height = 48; Margin = 0; IconSize = 24;
+            Opacity = -1; AccentColor = 0; AccentWindows = AutoTheme = Border = ReduceMotion = CalmOnBattery = false;
+            InkMode = FillMode = 0; TextSize = 12;
+            IconGap = 2; Indicator = HoverEffect = MinWidth = MiddleClick = WheelAction = 0;
+            MonoIcons = HideStart = false; LaunchBounce = Previews = true;
+            HiddenApps = new string[0];
+            ShowNet = ShowVolume = ShowBattery = true;
+            BatteryPercent = ShowCpu = ShowRam = ShowMedia = Notices = false;
+            ClockTime = ClockDate = 0;
+            HideDelay = 450;
             bool ownLeft = false, ownRight = false;
             string lang = "";
             try
@@ -213,9 +301,42 @@ namespace NeuTaskBar
                         case "hideleft": HideLeft = val.StartsWith("1"); break;
                         case "hideright": HideRight = val.StartsWith("1"); break;
                         case "join": Join = val.StartsWith("1"); break;
+                        case "fullbar": FullBar = val.StartsWith("1"); break;
                         case "lang": lang = val.Length > 2 ? val.Substring(0, 2) : val; break;
                         case "cornerleft": CornerLeft = ParseCorner(val); break;
-                        case "cornerright": CornerRight = ParseCorner(val); break;
+                        case "cornerright": CornerRight = ParseCorner(val); if (CornerRight >= CornerCount) CornerRight = -1; break;
+                        case "opacity": Opacity = Num(val, 0, 100, -1); break;
+                        case "accent": uint acc = 0; AccentColor = ParseColor(val, ref acc) ? acc & 0xFFFFFF : 0; break;
+                        case "accentwin": AccentWindows = On(val); break;
+                        case "autotheme": AutoTheme = On(val); break;
+                        case "fill": FillMode = Num(val, 0, 1, 0); break;
+                        case "border": Border = On(val); break;
+                        case "ink": InkMode = Num(val, 0, 2, 0); break;
+                        case "textsize": TextSize = Num(val, 10, 16, 12); break;
+                        case "reducemotion": ReduceMotion = On(val); break;
+                        case "calmonbattery": CalmOnBattery = On(val); break;
+                        case "icongap": IconGap = Num(val, 0, 16, 2); break;
+                        case "indicator": Indicator = Num(val, 0, 2, 0); break;
+                        case "mono": MonoIcons = On(val); break;
+                        case "hover": HoverEffect = Num(val, 0, 2, 0); break;
+                        case "bounce": LaunchBounce = On(val); break;
+                        case "hidestart": HideStart = On(val); break;
+                        case "minwidth": MinWidth = Num(val, 0, 1600, 0); break;
+                        case "middleclick": MiddleClick = Num(val, 0, 1, 0); break;
+                        case "wheel": WheelAction = Num(val, 0, 1, 0); break;
+                        case "previews": Previews = On(val); break;
+                        case "hideapps": HiddenApps = SplitList(val); break;
+                        case "shownet": ShowNet = On(val); break;
+                        case "showvol": ShowVolume = On(val); break;
+                        case "showbat": ShowBattery = On(val); break;
+                        case "batpercent": BatteryPercent = On(val); break;
+                        case "clocktime": ClockTime = Num(val, 0, 2, 0); break;
+                        case "clockdate": ClockDate = Num(val, 0, 2, 0); break;
+                        case "showcpu": ShowCpu = On(val); break;
+                        case "showram": ShowRam = On(val); break;
+                        case "showmedia": ShowMedia = On(val); break;
+                        case "notices": Notices = On(val); break;
+                        case "hidedelay": HideDelay = Num(val, 0, 3000, 450); break;
                     }
                 }
             }
@@ -223,6 +344,130 @@ namespace NeuTaskBar
             L.Set(lang);   // sin elegir, el idioma de Windows
             if (!ownLeft) TintLeft = Tint;
             if (!ownRight) TintRight = Tint;
+            ReadWindowsTheme();
+        }
+
+        static bool On(string val) { return val.StartsWith("1"); }
+
+        // Número entre min y max; cualquier otra cosa vale def.
+        static int Num(string val, int min, int max, int def)
+        {
+            int n;
+            return int.TryParse(val, out n) && n >= min && n <= max ? n : def;
+        }
+
+        // Lista separada por ";" en minúsculas y sin entradas vacías.
+        static string[] SplitList(string val)
+        {
+            var list = new System.Collections.Generic.List<string>();
+            foreach (string part in val.Split(';'))
+            {
+                string p = part.Trim().ToLowerInvariant();
+                if (p.Length > 0 && !list.Contains(p)) list.Add(p);
+            }
+            return list.ToArray();
+        }
+
+        // ---- Temas y copia de los ajustes
+        // Claves que definen el aspecto de las islas y lo que muestran: son las que cambia un tema.
+        static readonly string[] LookKeys =
+        {
+            "height", "iconsize", "margin", "tint", "tintleft", "tintright", "opacity", "accent", "accentwin", "autotheme", "fill", "border",
+            "ink", "textsize", "icongap", "indicator", "mono", "hover", "bounce", "hidestart", "minwidth", "shownet", "showvol",
+            "showbat", "batpercent", "clocktime", "clockdate", "showcpu", "showram", "showmedia", "notices"
+        };
+        // El resto de lo que se elige en la aplicación (el idioma y las apps ocultas son de cada equipo y no se copian).
+        static readonly string[] OtherKeys =
+        {
+            "hideleft", "hideright", "join", "fullbar", "cornerleft", "cornerright", "reducemotion", "calmonbattery", "middleclick", "wheel",
+            "previews", "hidedelay"
+        };
+
+        public static readonly string[] ThemeNames = { "Clásico", "Claro", "Cristal", "Compacto", "Flotante" };
+        static readonly string[][] Themes =
+        {
+            new string[0],
+            new[] { "tintleft=CCF3F3F3", "tintright=CCF3F3F3" },
+            new[] { "tintleft=00000000", "tintright=00000000", "border=1" },
+            new[] { "height=40", "iconsize=20", "icongap=0", "textsize=11" },
+            new[] { "margin=8", "border=1", "opacity=70" }
+        };
+
+        // Aplica un tema: el aspecto vuelve al de fábrica y encima se ponen los ajustes del tema.
+        public static void ApplyTheme(int index)
+        {
+            var values = new System.Collections.Generic.Dictionary<string, string>();
+            foreach (string k in LookKeys) values[k] = null;
+            foreach (string pair in Themes[index])
+            {
+                int eq = pair.IndexOf('=');
+                values[pair.Substring(0, eq)] = pair.Substring(eq + 1);
+            }
+            SaveMany(values);
+            Load();
+        }
+
+        // Todo vuelve a como viene de fábrica (menos el idioma y las apps ocultas).
+        public static void ResetSettings()
+        {
+            var values = new System.Collections.Generic.Dictionary<string, string>();
+            foreach (string k in LookKeys) values[k] = null;
+            foreach (string k in OtherKeys) values[k] = null;
+            SaveMany(values);
+            Load();
+        }
+
+        // Copia los ajustes a un archivo que luego puede importarse, aquí o en otro equipo.
+        public static bool ExportSettings(string file)
+        {
+            try
+            {
+                var keys = new System.Collections.Generic.List<string>(LookKeys);
+                keys.AddRange(OtherKeys);
+                var lines = new System.Collections.Generic.List<string>();
+                lines.Add("# NeuTaskBar");
+                string path = Path.Combine(DataDir, "config.ini");
+                foreach (string raw in File.Exists(path) ? File.ReadAllLines(path) : new string[0])
+                {
+                    string line = raw.Trim();
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0 || line[0] == '#' || line[0] == ';') continue;
+                    string key = line.Substring(0, eq).Trim().ToLowerInvariant();
+                    if (keys.Contains(key)) lines.Add(key + "=" + line.Substring(eq + 1).Trim());
+                }
+                File.WriteAllLines(file, lines.ToArray());
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // Sustituye los ajustes por los de un archivo exportado. Solo se leen las claves conocidas: lo demás se ignora.
+        public static bool ImportSettings(string file)
+        {
+            try
+            {
+                var keys = new System.Collections.Generic.List<string>(LookKeys);
+                keys.AddRange(OtherKeys);
+                var values = new System.Collections.Generic.Dictionary<string, string>();
+                foreach (string k in keys) values[k] = null;
+                int read = 0;
+                foreach (string raw in File.ReadAllLines(file))
+                {
+                    string line = raw.Trim();
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0 || line[0] == '#' || line[0] == ';') continue;
+                    string key = line.Substring(0, eq).Trim().ToLowerInvariant();
+                    string val = line.Substring(eq + 1).Trim();
+                    if (!keys.Contains(key) || val.Length > 64) continue;
+                    values[key] = val;
+                    read++;
+                }
+                if (read == 0) return false;
+                SaveMany(values);
+                Load();
+                return true;
+            }
+            catch { return false; }
         }
 
         // Color AARRGGBB en hexadecimal. Con solo RRGGBB se le da la opacidad de los colores de Apariencia.
@@ -240,23 +485,34 @@ namespace NeuTaskBar
         // Guarda una clave en config.ini conservando el resto del archivo (las demás claves y los comentarios).
         public static void Save(string key, string value)
         {
+            var values = new System.Collections.Generic.Dictionary<string, string>();
+            values[key] = value;
+            SaveMany(values);
+        }
+
+        // Lo mismo con varias claves de una vez; una clave con valor null se quita del archivo.
+        public static void SaveMany(System.Collections.Generic.Dictionary<string, string> values)
+        {
             try
             {
                 Directory.CreateDirectory(DataDir);
                 string path = Path.Combine(DataDir, "config.ini");
                 var lines = new System.Collections.Generic.List<string>();
                 if (File.Exists(path)) lines.AddRange(File.ReadAllLines(path));
-                bool found = false;
+                var pending = new System.Collections.Generic.Dictionary<string, string>(values);
                 for (int i = 0; i < lines.Count; i++)
                 {
                     string line = lines[i].Trim();
                     int eq = line.IndexOf('=');
                     if (eq < 0 || line[0] == '#' || line[0] == ';') continue;
-                    if (line.Substring(0, eq).Trim().ToLowerInvariant() != key) continue;
-                    if (found) lines.RemoveAt(i--);
-                    else { lines[i] = key + "=" + value; found = true; }
+                    string key = line.Substring(0, eq).Trim().ToLowerInvariant();
+                    string value;
+                    if (!values.TryGetValue(key, out value)) continue;
+                    // Se quita si así se pide o si la clave ya quedó escrita más arriba.
+                    if (value == null || !pending.Remove(key)) lines.RemoveAt(i--);
+                    else lines[i] = key + "=" + value;
                 }
-                if (!found) lines.Add(key + "=" + value);
+                foreach (var kv in pending) if (kv.Value != null) lines.Add(kv.Key + "=" + kv.Value);
                 File.WriteAllLines(path, lines.ToArray());
             }
             catch { }

@@ -103,11 +103,66 @@ namespace NeuTaskBar
             GdipDeletePath(path);
         }
 
+        [DllImport("gdiplus.dll")] static extern int GdipCreatePen1(uint argb, float width, int unit, out IntPtr pen);
+        [DllImport("gdiplus.dll")] static extern int GdipDeletePen(IntPtr pen);
+        [DllImport("gdiplus.dll")] static extern int GdipDrawPath(IntPtr g, IntPtr pen, IntPtr path);
+        [DllImport("gdiplus.dll")] static extern int GdipAddPathRectangle(IntPtr path, float x, float y, float w, float h);
+        [DllImport("gdiplus.dll")] static extern int GdipFillEllipse(IntPtr g, IntPtr brush, float x, float y, float w, float h);
+
+        public static void FillEllipse(IntPtr g, float x, float y, float w, float h, uint argb)
+        {
+            if (w <= 0 || h <= 0 || (argb >> 24) == 0) return;
+            GdipSetSolidFillColor(brush, argb);
+            GdipFillEllipse(g, brush, x, y, w, h);
+        }
+
+        // Contorno de un rectángulo redondeado, con la línea por dentro de él.
+        public static void StrokeRound(IntPtr g, float x, float y, float w, float h, float r, float width, uint argb)
+        {
+            if (w <= width * 2 || h <= width * 2 || (argb >> 24) == 0) return;
+            float half = width / 2f;
+            x += half; y += half; w -= width; h -= width;
+            r = Math.Max(0f, Math.Min(r - half, Math.Min(w, h) / 2f));
+            IntPtr path, pen;
+            GdipCreatePath(0, out path);
+            if (r < 0.5f) GdipAddPathRectangle(path, x, y, w, h);
+            else
+            {
+                float d = r * 2f;
+                GdipAddPathArc(path, x, y, d, d, 180, 90);
+                GdipAddPathArc(path, x + w - d, y, d, d, 270, 90);
+                GdipAddPathArc(path, x + w - d, y + h - d, d, d, 0, 90);
+                GdipAddPathArc(path, x, y + h - d, d, d, 90, 90);
+                GdipClosePathFigure(path);
+            }
+            if (GdipCreatePen1(argb, width, 2 /* UnitPixel */, out pen) == 0)
+            {
+                GdipDrawPath(g, pen, path);
+                GdipDeletePen(pen);
+            }
+            GdipDeletePath(path);
+        }
+
         public static void DrawImage(IntPtr g, IconImage img, float x, float y, float w, float h, float alpha)
+        {
+            DrawImage(g, img, x, y, w, h, alpha, false);
+        }
+
+        // gray = en escala de grises (los tres canales pasan a valer la luminosidad del píxel).
+        public static void DrawImage(IntPtr g, IconImage img, float x, float y, float w, float h, float alpha, bool gray)
         {
             if (img == null || img.Image == IntPtr.Zero || w <= 0 || h <= 0 || alpha <= 0f) return;
             IntPtr a = IntPtr.Zero;
-            if (alpha < 0.995f)
+            if (gray)
+            {
+                Array.Clear(matrix, 0, 25);
+                for (int c = 0; c < 3; c++) { matrix[c] = 0.299f; matrix[5 + c] = 0.587f; matrix[10 + c] = 0.114f; }
+                matrix[18] = Math.Min(1f, alpha);
+                matrix[24] = 1f;
+                GdipSetImageAttributesColorMatrix(attrs, 0, true, matrix, null, 0);
+                a = attrs;
+            }
+            else if (alpha < 0.995f)
             {
                 Array.Clear(matrix, 0, 25);
                 matrix[0] = matrix[6] = matrix[12] = 1f;
@@ -158,13 +213,14 @@ namespace NeuTaskBar
     // Valor animado con aproximación exponencial (independiente de la tasa de refresco).
     struct Ease
     {
+        public static bool Instant;   // sin animaciones: los valores saltan a su destino
         public float V, T;
         public Ease(float v) { V = v; T = v; }
         public bool Step(float dt, float rate, float eps)
         {
             if (V == T) return false;
             float d = T - V;
-            if (Math.Abs(d) <= eps) { V = T; return true; }
+            if (Instant || Math.Abs(d) <= eps) { V = T; return true; }
             V += d * (1f - (float)Math.Exp(-rate * dt));
             if (Math.Abs(T - V) <= eps) V = T;
             return true;

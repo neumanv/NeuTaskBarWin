@@ -172,6 +172,10 @@ namespace NeuTaskBar
         public string Label;            // texto junto al icono (solo con "no combinar botones"); null = sin etiqueta
         public string Aumid = "";       // AppUserModelID de la ventana (si lo declara)
         public bool Packaged;           // app empaquetada de la Tienda: icono y arranque salen del paquete, no del exe
+        // Grupo de apps ancladas que comparten un botón: sus apps y la lista de PinStore a la que corresponde (su
+        // lista de ventanas reúne entonces las de todas ellas). En una app normal, null.
+        public List<AppItem> Members;
+        public List<string> Group;
 
         public bool Running { get { return Windows.Count > 0; } }
     }
@@ -181,6 +185,7 @@ namespace NeuTaskBar
         public string Path;     // .lnk o .exe
         public string Exe;      // exe resuelto en minúsculas ("" si no se pudo resolver)
         public string Aumid = "";   // AppUserModelID en minúsculas ("" si no tiene)
+        public string Identity = "";    // programa al que lleva de verdad (Shortcut.AppIdentity)
         public string Name;
     }
 
@@ -194,8 +199,44 @@ namespace NeuTaskBar
 
         public static void Resolve(string path, out string target, out string name, out string aumid)
         {
+            string args;
+            Resolve(path, out target, out name, out aumid, out args);
+        }
+
+        // Identidad de una app, para emparejar lo anclado con lo abierto cuando la ruta del exe no coincide. Los
+        // instaladores tipo Squirrel (Discord, Slack, Teams...) dejan el programa en una carpeta "app-<versión>" que
+        // cambia con cada actualización, y sus accesos directos apuntan a un lanzador que lo abre
+        // ("Update.exe --processStart Programa.exe"). Devuelve la ruta del programa, en minúsculas y sin la carpeta
+        // de versión: la misma para el acceso directo y para el proceso en marcha.
+        public static string AppIdentity(string exe, string args)
+        {
+            if (string.IsNullOrEmpty(exe)) return "";
+            string path = exe.ToLowerInvariant();
+            try
+            {
+                const string flag = "--processstart";
+                string a = (args ?? "").ToLowerInvariant();
+                int at = a.IndexOf(flag);
+                if (at >= 0)
+                {
+                    // El lanzador abre el programa que se le nombra, que vive junto a él.
+                    string rest = a.Substring(at + flag.Length).TrimStart(' ', '=');
+                    int end = rest.StartsWith("\"") ? rest.IndexOf('"', 1) : rest.IndexOf(' ');
+                    string program = (end < 0 ? rest : rest.Substring(0, end)).Trim('"', ' ');
+                    if (program.Length > 0) path = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(path), System.IO.Path.GetFileName(program));
+                }
+                var parts = new List<string>(path.Split('\\'));
+                parts.RemoveAll(s => s.Length > 4 && s.StartsWith("app-") && char.IsDigit(s[4]));
+                return string.Join("\\", parts.ToArray());
+            }
+            catch { return path; }
+        }
+
+        public static void Resolve(string path, out string target, out string name, out string aumid, out string args)
+        {
             target = "";
             aumid = "";
+            args = "";
             name = System.IO.Path.GetFileNameWithoutExtension(path);
             if (!path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
             {
@@ -209,6 +250,9 @@ namespace NeuTaskBar
                 var sb = new StringBuilder(520);
                 link.GetPath(sb, sb.Capacity, IntPtr.Zero, 0);
                 target = sb.ToString();
+                var ab = new StringBuilder(2048);
+                link.GetArguments(ab, ab.Capacity);
+                args = ab.ToString();
                 aumid = AppUserModel.FromLink(link);
                 Marshal.ReleaseComObject(link);
             }
@@ -246,6 +290,7 @@ namespace NeuTaskBar
                 }
             }
             catch { }
+            LoadGroups();
         }
 
         void SeedFromWindows()
@@ -266,20 +311,23 @@ namespace NeuTaskBar
                 Pins.Add(new PinEntry { Path = path, Exe = "", Aumid = id.ToLowerInvariant(), Name = displayName ?? id });
                 return;
             }
-            string target, name, aumid;
-            Shortcut.Resolve(path, out target, out name, out aumid);
+            string target, name, aumid, args;
+            Shortcut.Resolve(path, out target, out name, out aumid, out args);
             Pins.Add(new PinEntry
             {
-                Path = path, Exe = (target ?? "").ToLowerInvariant(), Aumid = (aumid ?? "").ToLowerInvariant(), Name = displayName ?? name
+                Path = path, Exe = (target ?? "").ToLowerInvariant(), Aumid = (aumid ?? "").ToLowerInvariant(), Name = displayName ?? name,
+                Identity = Shortcut.AppIdentity(target, args)
             });
         }
 
-        public bool Contains(string exe, string aumid)
+        // ¿Está ya anclada esa app? Vale el mismo exe, el mismo AppUserModelID o la misma app por otro camino (identity).
+        public bool Contains(string exe, string aumid, string identity)
         {
             foreach (var p in Pins)
             {
                 if (p.Exe.Length > 0 && p.Exe == exe) return true;
                 if (p.Aumid.Length > 0 && p.Aumid == aumid) return true;
+                if (p.Identity.Length > 0 && p.Identity == identity) return true;
             }
             return false;
         }
@@ -308,6 +356,136 @@ namespace NeuTaskBar
         {
             Pins.RemoveAll(p => string.Equals(p.Path, path, StringComparison.OrdinalIgnoreCase));
             Save();
+            LoadGroups();   // la app sale también del grupo en el que estuviera
+            SaveGroups();
+        }
+
+        // ---- Grupos: varias apps ancladas (hasta MaxGroupSize) que en la barra ocupan un solo botón. Cada grupo es
+        // la lista de rutas (PinEntry.Path) de sus apps, en el orden en que se añadieron. Se guardan en groups.txt, un
+        // grupo por línea con las rutas separadas por "|" (un carácter que no cabe en una ruta).
+        public const int MaxGroupSize = 4;
+        public readonly List<List<string>> Groups = new List<List<string>>();
+        static string GroupsPath { get { return System.IO.Path.Combine(Config.DataDir, "groups.txt"); } }
+
+        static bool Same(string a, string b) { return string.Equals(a, b, StringComparison.OrdinalIgnoreCase); }
+
+        // Lee los grupos y los deja coherentes con lo anclado: sin apps que ya no lo están ni repetidas, con
+        // MaxGroupSize como mucho y sin grupos vacíos.
+        public void LoadGroups()
+        {
+            Groups.Clear();
+            try
+            {
+                if (!File.Exists(GroupsPath)) return;
+                var taken = new List<string>();
+                foreach (string line in File.ReadAllLines(GroupsPath))
+                {
+                    var group = new List<string>();
+                    foreach (string part in line.Split('|'))
+                    {
+                        string path = part.Trim();
+                        var pin = Pins.Find(p => Same(p.Path, path));
+                        if (pin == null || group.Count >= MaxGroupSize || taken.Exists(t => Same(t, path))) continue;
+                        group.Add(pin.Path);
+                        taken.Add(pin.Path);
+                    }
+                    if (group.Count > 0) Groups.Add(group);
+                }
+            }
+            catch { }
+        }
+
+        void SaveGroups()
+        {
+            try
+            {
+                Directory.CreateDirectory(Config.DataDir);
+                var lines = new List<string>();
+                foreach (var g in Groups) lines.Add(string.Join("|", g.ToArray()));
+                if (lines.Count == 0) { if (File.Exists(GroupsPath)) File.Delete(GroupsPath); }
+                else File.WriteAllLines(GroupsPath, lines.ToArray());
+            }
+            catch { }
+        }
+
+        // Grupo al que pertenece una app anclada (null si a ninguno).
+        public List<string> GroupOf(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            foreach (var g in Groups) if (g.Exists(m => Same(m, path))) return g;
+            return null;
+        }
+
+        // Nombre con el que se enseña un grupo: los de sus apps.
+        public string GroupName(List<string> group)
+        {
+            var names = new List<string>();
+            foreach (string path in group)
+            {
+                var pin = Pins.Find(p => Same(p.Path, path));
+                if (pin != null) names.Add(pin.Name);
+            }
+            return string.Join(", ", names.ToArray());
+        }
+
+        // Empieza un grupo con una app anclada (si estaba en otro, sale de él).
+        public void CreateGroup(string path)
+        {
+            if (Pins.Find(p => Same(p.Path, path)) == null) return;
+            Detach(path);
+            Groups.Add(new List<string> { path });
+            SaveGroups();
+        }
+
+        // Añade una app anclada al grupo en el que está otra (member); false si no cabe o ya está en él.
+        public bool AddToGroup(string member, string path)
+        {
+            var group = GroupOf(member);
+            if (group == null || group.Count >= MaxGroupSize || group.Exists(m => Same(m, path))) return false;
+            if (Pins.Find(p => Same(p.Path, path)) == null) return false;
+            Detach(path);   // sale del grupo en el que estuviera
+            group.Add(path);
+            SaveGroups();
+            return true;
+        }
+
+        // La app vuelve a tener su propio botón.
+        public void RemoveFromGroup(string path)
+        {
+            Detach(path);
+            SaveGroups();
+        }
+
+        // Deshace el grupo en el que está una app: todas vuelven a tener su botón.
+        public void DissolveGroup(string member)
+        {
+            var group = GroupOf(member);
+            if (group == null) return;
+            Groups.Remove(group);
+            SaveGroups();
+        }
+
+        void Detach(string path)
+        {
+            foreach (var g in Groups) g.RemoveAll(m => Same(m, path));
+            Groups.RemoveAll(g => g.Count == 0);
+        }
+
+        // Para la ventana de la aplicación, que no lleva la lista de lo anclado: cuántos grupos hay, y deshacerlos todos.
+        public static int CountGroups()
+        {
+            try
+            {
+                int n = 0;
+                if (File.Exists(GroupsPath)) foreach (string line in File.ReadAllLines(GroupsPath)) if (line.Trim().Length > 0) n++;
+                return n;
+            }
+            catch { return 0; }
+        }
+
+        public static void ClearGroups()
+        {
+            try { if (File.Exists(GroupsPath)) File.Delete(GroupsPath); } catch { }
         }
 
         void Save()
@@ -581,7 +759,9 @@ namespace NeuTaskBar
                     foreach (var g in running)
                     {
                         if (used.Contains(g.Key) || g.ExePath.Length == 0) continue;
-                        if (g.ExePath.ToLowerInvariant() != p.Exe) continue;
+                        // El mismo exe o, si el acceso directo lleva a un lanzador o a una versión anterior, la misma app:
+                        // sin esto la app saldría dos veces, anclada y abierta.
+                        if (g.ExePath.ToLowerInvariant() != p.Exe && Shortcut.AppIdentity(g.ExePath, null) != p.Identity) continue;
                         if (g.Aumid.Length > 0 && p.Aumid.Length > 0) continue;
                         it = g;
                         break;

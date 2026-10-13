@@ -88,12 +88,17 @@ namespace NeuTaskBar
     }
 
     // Página de la ventana principal. Para añadir opciones nuevas: crear una clase derivada y registrarla con MainForm.AddPage.
-    abstract class Page : Control
+    // Si el contenido no cabe en la ventana, la página se desplaza (barra lateral o rueda del ratón).
+    abstract class Page : ScrollableControl
     {
         protected readonly string title, subtitle;
         protected int ContentLeft { get { return Ui.S(40); } }
         protected int ContentWidth { get { return Math.Max(Ui.S(300), Math.Min(Width - Ui.S(80), Ui.S(760))); } }
         protected int HeaderHeight { get { return title.Length == 0 ? Ui.S(36) : (subtitle.Length == 0 ? Ui.S(88) : Ui.S(116)); } }
+
+        // Los ajustes se han sustituido de golpe (tema, importación, restablecer): hay que rehacer las páginas.
+        public event Action SettingsReplaced;
+        protected void OnSettingsReplaced() { if (SettingsReplaced != null) SettingsReplaced(); }
 
         protected Page(string title, string subtitle)
         {
@@ -102,10 +107,72 @@ namespace NeuTaskBar
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
             BackColor = Ui.Bg;
             Dock = DockStyle.Fill;
+            AutoScroll = true;
         }
 
         // Estado de la barra de tareas (lo recibe de la ventana principal).
         public virtual void UpdateEngine(EngineState state, bool busy, string busyText) { }
+
+        PillButton resetButton;
+        string[] resetKeys = new string[0];
+
+        // Pone en el encabezado un botón que devuelve a su valor de fábrica los ajustes de esta página (las claves de
+        // config.ini que se indican), después de preguntar.
+        protected void EnableReset(params string[] keys)
+        {
+            resetKeys = keys;
+            resetButton = Opt.Button(L.T("Restablecer"));
+            resetButton.BackColor = Ui.Bg;
+            resetButton.Click += (o, e) =>
+            {
+                string question = string.Format(L.T("Los ajustes de «{0}» volverán a como vienen de fábrica. ¿Continuar?"), title);
+                if (MessageBox.Show(FindForm(), question, "NeuTaskBar", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+                    MessageBoxDefaultButton.Button2) == DialogResult.Yes) ResetNow();
+            };
+            Controls.Add(resetButton);
+        }
+
+        // Quita de config.ini las claves de la página: sin ellas vale lo de fábrica. La barra lo aplica al momento y
+        // las páginas se rehacen para enseñar los valores nuevos.
+        void ResetNow()
+        {
+            var values = new Dictionary<string, string>();
+            foreach (string k in resetKeys) values[k] = null;
+            Config.SaveMany(values);
+            Config.Load();
+            Engine.ReloadConfig();
+            OnSettingsReplaced();
+        }
+
+        // Coloca las tarjetas una bajo otra a partir del encabezado y fija cuánto puede desplazarse la página.
+        protected void Stack(params Control[] cards)
+        {
+            int scroll = AutoScrollPosition.Y, y = HeaderHeight;
+            // El botón de restablecer va a la derecha del título.
+            if (resetButton != null) resetButton.Location = new Point(ContentLeft + ContentWidth - resetButton.Width, Ui.S(32) + scroll);
+            foreach (var c in cards)
+            {
+                var hero = c as HeroCard;
+                int h = hero != null ? hero.PreferredHeight : ((Card)c).PreferredHeight;
+                c.SetBounds(ContentLeft, y + scroll, ContentWidth, h);
+                y += h + Ui.S(16);
+            }
+            AutoScrollMinSize = new Size(0, y + Ui.S(8));
+        }
+
+        // Rueda del ratón (la reparte la ventana principal, tenga el foco quien lo tenga).
+        public void Wheel(int delta)
+        {
+            if (!VScroll) return;
+            AutoScrollPosition = new Point(0, -AutoScrollPosition.Y - delta * Ui.S(72) / 120);
+            Invalidate();
+        }
+
+        protected override void OnScroll(ScrollEventArgs se)
+        {
+            base.OnScroll(se);
+            Invalidate();
+        }
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -113,12 +180,63 @@ namespace NeuTaskBar
             g.Clear(BackColor);
             Ui.Smooth(g);
             if (title.Length == 0) return;
+            int scroll = AutoScrollPosition.Y;
             using (var f = Ui.Font(30, true))
-                Ui.Text(g, title, f, Ui.Ink, new Rectangle(ContentLeft, Ui.S(30), ContentWidth, Ui.S(40)), TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+                Ui.Text(g, title, f, Ui.Ink, new Rectangle(ContentLeft, Ui.S(30) + scroll, ContentWidth, Ui.S(40)), TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
             if (subtitle.Length > 0)
                 using (var f = Ui.Font(14, false))
-                    Ui.Text(g, subtitle, f, Ui.Muted, new Rectangle(ContentLeft, Ui.S(74), ContentWidth, Ui.S(22)), TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+                    Ui.Text(g, subtitle, f, Ui.Muted, new Rectangle(ContentLeft, Ui.S(74) + scroll, ContentWidth, Ui.S(22)), TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
         }
+    }
+
+    // Controles de una opción que se guarda en config.ini y se aplica al momento a la barra en marcha.
+    static class Opt
+    {
+        public static void Save(string key, string value)
+        {
+            Config.Save(key, value);
+            Config.Load();
+            Engine.ReloadConfig();
+        }
+
+        public static ToggleSwitch Toggle(string key, bool value)
+        {
+            var sw = new ToggleSwitch();
+            sw.Size = new Size(Ui.S(46), Ui.S(24));
+            sw.SetCheckedSilently(value);
+            sw.CheckedChanged += (o, e) => Save(key, sw.Checked ? "1" : "0");
+            return sw;
+        }
+
+        // Una opción entre varias; se guarda su posición (0, 1, 2...).
+        public static SegmentedPicker Choice(string key, int value, int segment, params string[] options)
+        {
+            var picker = new SegmentedPicker(options, segment);
+            picker.Selected = Math.Max(0, Math.Min(options.Length - 1, value));
+            picker.SelectedChanged += i => Save(key, i.ToString());
+            return picker;
+        }
+
+        public static Slider Range(string key, int value, int min, int max, int step, Func<int, string> format)
+        {
+            var slider = new Slider(min, max, step);
+            slider.Format = format;
+            slider.Value = value;
+            slider.ValueChanged += v => Save(key, v.ToString());
+            return slider;
+        }
+
+        public static PillButton Button(string text)
+        {
+            var b = new PillButton();
+            b.Text = text;
+            b.Mode = PillMode.Outline;
+            b.FontPx = 14;
+            b.Size = new Size(Ui.S(120), Ui.S(36));
+            return b;
+        }
+
+        public static string Px(int v) { return v + " px"; }
     }
 
     // Tarjeta de bienvenida con el botón principal.
@@ -229,10 +347,7 @@ namespace NeuTaskBar
         protected override void OnLayout(LayoutEventArgs e)
         {
             base.OnLayout(e);
-            int x = ContentLeft, w = ContentWidth, y = HeaderHeight;
-            hero.SetBounds(x, y, w, hero.PreferredHeight);
-            y += hero.PreferredHeight + Ui.S(16);
-            quick.SetBounds(x, y, w, quick.PreferredHeight);
+            Stack(hero, quick);
         }
     }
 
@@ -240,11 +355,36 @@ namespace NeuTaskBar
     sealed class AppearancePage : Page
     {
         readonly Card hide = new Card();
+        readonly Card size = new Card();
         readonly Card colors = new Card();
+        readonly Card detail = new Card();
         readonly Card card = new Card();
+
+        static readonly uint[] AccentPresets = { 0, 0xFF6CCB5F, 0xFFFFB900, 0xFFFF6B9D, 0xFFB4A0FF };
+        static readonly string[] AccentNames = { "Predeterminado", "Verde", "Ámbar", "Rosa", "Morado", "Otro color…" };
 
         public AppearancePage() : base(L.T("Apariencia"), L.T("Personaliza cómo se ven las islas de la barra de tareas."))
         {
+            EnableReset("hideleft", "hideright", "height", "iconsize", "margin", "textsize", "tintleft", "tintright", "opacity", "autotheme",
+                "fill", "accent", "accentwin", "ink", "border", "reducemotion", "calmonbattery");
+            size.AddRow(new SettingRow(L.T("Alto de las islas"), L.T("El de la barra de Windows es 48."), Opt.Range("height", Config.Height, 32, 72, 2, Opt.Px)));
+            size.AddRow(new SettingRow(L.T("Tamaño de los iconos"), L.T("Los de tus aplicaciones."), Opt.Range("iconsize", Config.IconSize, 16, 40, 2, Opt.Px)));
+            size.AddRow(new SettingRow(L.T("Separación con los bordes"), L.T("Con más de 0, las islas flotan."), Opt.Range("margin", Config.Margin, 0, 24, 1, Opt.Px)));
+            size.AddRow(new SettingRow(L.T("Tamaño del texto"), L.T("Reloj, fecha y etiquetas."), Opt.Range("textsize", Config.TextSize, 10, 16, 1, Opt.Px)));
+            Controls.Add(size);
+
+            detail.AddRow(new SettingRow(L.T("Color de énfasis"), L.T("Logo de Inicio y marca de la app activa."), AccentPicker()));
+            detail.AddRow(new SettingRow(L.T("Usar el color de énfasis de Windows"), L.T("El que elijas en Configuración > Personalización > Colores."),
+                Opt.Toggle("accentwin", Config.AccentWindows)));
+            detail.AddRow(new SettingRow(L.T("Color del contenido"), L.T("Texto e iconos del sistema."),
+                Opt.Choice("ink", Config.InkMode, 96, L.T("Automático"), L.T("Claro|ink"), L.T("Oscuro|ink"))));
+            detail.AddRow(new SettingRow(L.T("Contorno"), L.T("Una línea fina alrededor de cada isla."), Opt.Toggle("border", Config.Border)));
+            detail.AddRow(new SettingRow(L.T("Reducir animaciones"), L.T("Los cambios se muestran al instante, sin transiciones."),
+                Opt.Toggle("reducemotion", Config.ReduceMotion)));
+            detail.AddRow(new SettingRow(L.T("Sin animaciones con batería"), L.T("Solo hay animaciones con el equipo enchufado."),
+                Opt.Toggle("calmonbattery", Config.CalmOnBattery)));
+            Controls.Add(detail);
+
             hide.AddRow(new SettingRow(L.T("Ocultar la isla de aplicaciones"), L.T("Inicio y tus apps. Vuelve al pasar el ratón por su sitio."),
                 HideSwitch("hideleft", Config.HideLeft, on => Config.HideLeft = on)));
             hide.AddRow(new SettingRow(L.T("Ocultar la isla de información"), L.T("Red, volumen, batería y reloj. Vuelve al pasar el ratón por su sitio."),
@@ -255,6 +395,11 @@ namespace NeuTaskBar
                 ColorPicker("tintleft", Config.TintLeft, c => Config.TintLeft = c)));
             colors.AddRow(new SettingRow(L.T("Color de la isla de información"), L.T("Un color, transparente o el que tú elijas."),
                 ColorPicker("tintright", Config.TintRight, c => Config.TintRight = c)));
+            colors.AddRow(new SettingRow(L.T("Opacidad del color"), L.T("Cuánto tapa el color lo que hay detrás."), OpacitySlider()));
+            colors.AddRow(new SettingRow(L.T("Seguir el modo de Windows"), L.T("Islas claras u oscuras como Windows, en vez de los colores de arriba."),
+                Opt.Toggle("autotheme", Config.AutoTheme)));
+            colors.AddRow(new SettingRow(L.T("Relleno entre las islas"), L.T("Bajo una ventana maximizada."),
+                Opt.Choice("fill", Config.FillMode, 140, L.T("Seguir la ventana"), L.T("Color de las islas"))));
             Controls.Add(colors);
 
             card.AddRow(new SettingRow(L.T("Ajustes de la barra"), L.T("La posición, la alineación, los botones, las etiquetas, el reloj y la ocultación automática siguen lo que elijas en Configuración > Personalización > Barra de tareas."), null));
@@ -290,15 +435,253 @@ namespace NeuTaskBar
             return picker;
         }
 
+        // Opacidad común de las dos islas; en el extremo izquierdo ("Auto") cada color conserva la suya.
+        static Slider OpacitySlider()
+        {
+            var slider = new Slider(-5, 100, 5);
+            slider.Format = v => v < 0 ? L.T("Auto") : v + " %";
+            slider.Value = Config.Opacity < 0 ? -5 : Config.Opacity;
+            slider.ValueChanged += v => Opt.Save("opacity", v < 0 ? "" : v.ToString());
+            return slider;
+        }
+
+        // Color de énfasis: el predeterminado (un azul que cambia con la tinta), varios hechos o uno a medida.
+        static SwatchPicker AccentPicker()
+        {
+            var picker = new SwatchPicker(AccentPresets, AccentNames, 0xFF000000, 0xFF4CC2FF);
+            picker.Value = Config.AccentColor == 0 ? 0 : 0xFF000000 | Config.AccentColor;
+            picker.ValueChanged += c => Opt.Save("accent", (c & 0xFFFFFF) == 0 ? "" : (c & 0xFFFFFF).ToString("X6"));
+            return picker;
+        }
+
         protected override void OnLayout(LayoutEventArgs e)
         {
             base.OnLayout(e);
-            int y = HeaderHeight;
-            hide.SetBounds(ContentLeft, y, ContentWidth, hide.PreferredHeight);
-            y += hide.PreferredHeight + Ui.S(16);
-            colors.SetBounds(ContentLeft, y, ContentWidth, colors.PreferredHeight);
-            y += colors.PreferredHeight + Ui.S(16);
-            card.SetBounds(ContentLeft, y, ContentWidth, card.PreferredHeight);
+            Stack(hide, size, colors, detail, card);
+        }
+    }
+
+    // Aplicaciones: aspecto y contenido de la isla de aplicaciones.
+    sealed class AppsPage : Page
+    {
+        readonly Card look = new Card();
+        readonly Card shape = new Card();
+        readonly Card hidden = new Card();
+        readonly SettingRow hiddenRow, groupsRow;
+        readonly PillButton showAll, ungroupAll;
+        string hiddenShown;
+        int groupsShown = -1;
+
+        public AppsPage() : base(L.T("Aplicaciones"), L.T("Personaliza la isla de aplicaciones."))
+        {
+            EnableReset("indicator", "hover", "icongap", "mono", "bounce", "hidestart", "minwidth", "hideapps");
+            look.AddRow(new SettingRow(L.T("Marca de app abierta"), L.T("Bajo el icono: una por ventana abierta, hasta cuatro."),
+                Opt.Choice("indicator", Config.Indicator, 88, L.T("Línea"), L.T("Punto"), L.T("Ninguna"))));
+            look.AddRow(new SettingRow(L.T("Al pasar el ratón"), L.T("Cómo responde el icono."),
+                Opt.Choice("hover", Config.HoverEffect, 88, L.T("Resaltar"), L.T("Ampliar"), L.T("Nada"))));
+            look.AddRow(new SettingRow(L.T("Separación entre iconos"), "", Opt.Range("icongap", Config.IconGap, 0, 12, 1, Opt.Px)));
+            look.AddRow(new SettingRow(L.T("Iconos en gris"), L.T("Todos los iconos en un solo tono."), Opt.Toggle("mono", Config.MonoIcons)));
+            look.AddRow(new SettingRow(L.T("Rebote al abrir"), L.T("El icono rebota mientras la app se abre."), Opt.Toggle("bounce", Config.LaunchBounce)));
+            Controls.Add(look);
+
+            var start = new ToggleSwitch();
+            start.Size = new Size(Ui.S(46), Ui.S(24));
+            start.SetCheckedSilently(!Config.HideStart);
+            start.CheckedChanged += (o, e) => Opt.Save("hidestart", start.Checked ? "0" : "1");
+            shape.AddRow(new SettingRow(L.T("Botón de Inicio"), L.T("Sin él, la tecla Windows sigue abriendo Inicio."), start));
+            shape.AddRow(new SettingRow(L.T("Anchura mínima"), L.T("La isla no encoge por debajo de esta anchura."),
+                Opt.Range("minwidth", Config.MinWidth, 0, 1200, 40, v => v == 0 ? L.T("Auto") : Opt.Px(v))));
+            Controls.Add(shape);
+
+            showAll = Opt.Button(L.T("Mostrar todas"));
+            showAll.Size = new Size(Ui.S(150), Ui.S(36));
+            showAll.Click += (o, e) => { Opt.Save("hideapps", ""); ShowHidden(); };
+            hiddenRow = new SettingRow(L.T("Aplicaciones ocultas"), "", showAll);
+            hidden.AddRow(hiddenRow);
+
+            // Los grupos se hacen en la propia barra; aquí se explica cómo y se pueden deshacer todos.
+            ungroupAll = Opt.Button(L.T("Deshacer todos"));
+            ungroupAll.Size = new Size(Ui.S(150), Ui.S(36));
+            ungroupAll.Click += (o, e) => { PinStore.ClearGroups(); Engine.ReloadConfig(); ShowGroups(); };
+            groupsRow = new SettingRow(L.T("Grupos de aplicaciones"), "", ungroupAll);
+            hidden.AddRow(groupsRow);
+            Controls.Add(hidden);
+            ShowHidden();
+            ShowGroups();
+        }
+
+        void ShowGroups()
+        {
+            int n = PinStore.CountGroups();
+            if (n == groupsShown) return;
+            groupsShown = n;
+            groupsRow.Title = L.T("Grupos de aplicaciones") + (n > 0 ? " (" + n + ")" : "");
+            groupsRow.Description = L.T("Clic derecho en una app ▸ Crear grupo. Hasta 4 por grupo.");
+            ungroupAll.Mode = n == 0 ? PillMode.Busy : PillMode.Outline;
+            groupsRow.Invalidate();
+        }
+
+        void ShowHidden()
+        {
+            string text = Config.HiddenApps.Length == 0 ? L.T("Ninguna. Se ocultan desde el menú de su icono en la barra.") : string.Join(", ", Config.HiddenApps);
+            if (text == hiddenShown) return;
+            hiddenShown = text;
+            hiddenRow.Description = text;
+            showAll.Mode = Config.HiddenApps.Length == 0 ? PillMode.Busy : PillMode.Outline;
+            hiddenRow.Invalidate();
+        }
+
+        // Las apps se ocultan desde la barra, con la ventana quizá abierta: la lista se repasa mientras se ve la página.
+        public override void UpdateEngine(EngineState state, bool busy, string busyText)
+        {
+            if (!Visible) return;
+            Config.Load();
+            ShowHidden();
+            ShowGroups();
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            Stack(look, shape, hidden);
+        }
+    }
+
+    // Información: lo que muestra la isla de información.
+    sealed class InfoPage : Page
+    {
+        readonly Card icons = new Card();
+        readonly Card clock = new Card();
+        readonly Card extras = new Card();
+
+        public InfoPage() : base(L.T("Información"), L.T("Elige qué muestra la isla de información."))
+        {
+            EnableReset("shownet", "showvol", "showbat", "batpercent", "clocktime", "clockdate", "showcpu", "showram", "showmedia", "notices");
+            icons.AddRow(new SettingRow(L.T("Red"), L.T("Icono de la conexión a Internet."), Opt.Toggle("shownet", Config.ShowNet)));
+            icons.AddRow(new SettingRow(L.T("Volumen"), L.T("La rueda del ratón sobre el icono lo sube y lo baja."), Opt.Toggle("showvol", Config.ShowVolume)));
+            icons.AddRow(new SettingRow(L.T("Batería"), L.T("Solo aparece en equipos con batería."), Opt.Toggle("showbat", Config.ShowBattery)));
+            icons.AddRow(new SettingRow(L.T("Porcentaje de batería"), L.T("La carga en números, junto al icono."), Opt.Toggle("batpercent", Config.BatteryPercent)));
+            Controls.Add(icons);
+
+            clock.AddRow(new SettingRow(L.T("Formato de la hora"), L.T("El de Windows, o siempre 24 o 12 horas."),
+                Opt.Choice("clocktime", Config.ClockTime, 88, "Windows", L.T("24 h"), L.T("12 h"))));
+            clock.AddRow(new SettingRow(L.T("Fecha"), L.T("Bajo la hora."),
+                Opt.Choice("clockdate", Config.ClockDate, 100, L.T("Corta"), L.T("Con día"), L.T("Sin fecha"))));
+            Controls.Add(clock);
+
+            extras.AddRow(new SettingRow(L.T("Uso del procesador"), L.T("Porcentaje de CPU en uso. Al pulsarlo se abre el Administrador de tareas."),
+                Opt.Toggle("showcpu", Config.ShowCpu)));
+            extras.AddRow(new SettingRow(L.T("Uso de la memoria"), L.T("Porcentaje de RAM en uso."), Opt.Toggle("showram", Config.ShowRam)));
+            extras.AddRow(new SettingRow(L.T("Controles multimedia"), L.T("Anterior, reproducir o pausar y siguiente."), Opt.Toggle("showmedia", Config.ShowMedia)));
+            extras.AddRow(new SettingRow(L.T("Avisos en la isla"), L.T("El volumen y la batería se muestran un momento en el sitio del reloj al cambiar."),
+                Opt.Toggle("notices", Config.Notices)));
+            Controls.Add(extras);
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            Stack(icons, clock, extras);
+        }
+    }
+
+    // Comportamiento: cómo responde la barra al ratón.
+    sealed class BehaviorPage : Page
+    {
+        readonly Card card = new Card();
+
+        public BehaviorPage() : base(L.T("Comportamiento"), L.T("Elige cómo responde la barra al ratón."))
+        {
+            EnableReset("middleclick", "wheel", "previews", "hidedelay");
+            card.AddRow(new SettingRow(L.T("Clic central en una app"), L.T("Con la rueda del ratón pulsada."),
+                Opt.Choice("middleclick", Config.MiddleClick, 130, L.T("Nueva ventana"), L.T("Cerrar ventana"))));
+            card.AddRow(new SettingRow(L.T("Rueda sobre una app"), L.T("Al girarla encima de una app abierta."),
+                Opt.Choice("wheel", Config.WheelAction, 130, L.T("Nada"), L.T("Cambiar ventana"))));
+            card.AddRow(new SettingRow(L.T("Vistas previas"), L.T("Miniaturas de las ventanas al pasar el ratón por una app abierta."),
+                Opt.Toggle("previews", Config.Previews)));
+            card.AddRow(new SettingRow(L.T("Espera antes de esconderse"), L.T("Para las islas ocultas, al apartar el ratón."),
+                Opt.Range("hidedelay", Config.HideDelay, 0, 2000, 50, v => v + " ms")));
+            Controls.Add(card);
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            Stack(card);
+        }
+    }
+
+    // Temas: aspectos ya hechos, y copia de los ajustes para llevarlos a otro equipo.
+    sealed class ThemesPage : Page
+    {
+        static readonly string[] Descriptions =
+        {
+            "Las islas oscuras de siempre.", "Islas claras con el contenido en oscuro.", "Transparentes, con un contorno fino.",
+            "Islas más bajas e iconos más pequeños.", "Separadas de los bordes y con contorno."
+        };
+        readonly Card themes = new Card();
+        readonly Card backup = new Card();
+
+        public ThemesPage() : base(L.T("Temas"), L.T("Cambia el aspecto de una vez o lleva tus ajustes a otro equipo."))
+        {
+            for (int i = 0; i < Config.ThemeNames.Length; i++)
+            {
+                int index = i;
+                var apply = Opt.Button(L.T("Aplicar"));
+                apply.Click += (o, e) => { Config.ApplyTheme(index); Replaced(); };
+                themes.AddRow(new SettingRow(L.T(Config.ThemeNames[i] + "|theme"), L.T(Descriptions[i]), apply));
+            }
+            Controls.Add(themes);
+
+            var export = Opt.Button(L.T("Exportar"));
+            export.Click += (o, e) =>
+            {
+                using (var dlg = new SaveFileDialog())
+                {
+                    dlg.Filter = "NeuTaskBar (*.ini)|*.ini";
+                    dlg.FileName = "NeuTaskBar.ini";
+                    if (dlg.ShowDialog(FindForm()) == DialogResult.OK && !Config.ExportSettings(dlg.FileName))
+                        MessageBox.Show(FindForm(), L.T("No se ha podido guardar el archivo."), "NeuTaskBar", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            };
+            backup.AddRow(new SettingRow(L.T("Exportar ajustes"), L.T("Guarda tus ajustes en un archivo."), export));
+
+            var import = Opt.Button(L.T("Importar"));
+            import.Click += (o, e) =>
+            {
+                using (var dlg = new OpenFileDialog())
+                {
+                    dlg.Filter = "NeuTaskBar (*.ini)|*.ini";
+                    if (dlg.ShowDialog(FindForm()) != DialogResult.OK) return;
+                    if (Config.ImportSettings(dlg.FileName)) Replaced();
+                    else MessageBox.Show(FindForm(), L.T("Ese archivo no contiene ajustes de NeuTaskBar."), "NeuTaskBar", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            };
+            backup.AddRow(new SettingRow(L.T("Importar ajustes"), L.T("Sustituye tus ajustes por los de un archivo exportado."), import));
+
+            var reset = Opt.Button(L.T("Restablecer"));
+            reset.Click += (o, e) =>
+            {
+                if (MessageBox.Show(FindForm(), L.T("Todos los ajustes volverán a como vienen de fábrica. ¿Continuar?"), "NeuTaskBar",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                Config.ResetSettings();
+                Replaced();
+            };
+            backup.AddRow(new SettingRow(L.T("Restablecer todo"), L.T("Deja la aplicación como recién instalada. El idioma no cambia."), reset));
+            Controls.Add(backup);
+        }
+
+        // Los ajustes han cambiado de golpe: la barra los vuelve a leer y las páginas se rehacen con ellos.
+        void Replaced()
+        {
+            Engine.ReloadConfig();
+            OnSettingsReplaced();
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            Stack(themes, backup);
         }
     }
 
@@ -313,6 +696,19 @@ namespace NeuTaskBar
 
         public PositionPage() : base(L.T("Posición"), L.T("Elige dónde van las islas de la barra de tareas."))
         {
+            EnableReset("fullbar", "join", "cornerleft", "cornerright");
+            // Barra completa: manda sobre lo demás de la página (con ella no hay islas que unir ni que mover).
+            var fullBar = new ToggleSwitch();
+            fullBar.Size = new Size(Ui.S(46), Ui.S(24));
+            fullBar.SetCheckedSilently(Config.FullBar);
+            fullBar.CheckedChanged += (o, e) =>
+            {
+                if (fullBar.Checked && moving) SetMoving(false);
+                Opt.Save("fullbar", fullBar.Checked ? "1" : "0");
+                ShowMoveState();
+            };
+            card.AddRow(new SettingRow(L.T("Barra completa"), L.T("Una sola barra de lado a lado, como la de Windows, en vez de dos islas."), fullBar));
+
             join.Size = new Size(Ui.S(46), Ui.S(24));
             join.SetCheckedSilently(Config.Join);
             join.CheckedChanged += (o, e) =>
@@ -346,7 +742,7 @@ namespace NeuTaskBar
         // Mover es temporal: las islas solo se dejan arrastrar desde que se pulsa "Mover" hasta que se confirma.
         void SetMoving(bool on)
         {
-            if (on && !engineOn) return;
+            if (on && (!engineOn || Config.FullBar)) return;
             moving = on;
             Engine.SetMoveMode(on);
             ShowMoveState();
@@ -355,8 +751,9 @@ namespace NeuTaskBar
         void ShowMoveState()
         {
             move.Text = moving ? L.T("Confirmar") : L.T("Mover");
-            move.Mode = moving ? PillMode.Primary : engineOn ? PillMode.Outline : PillMode.Busy;
-            moveRow.Description = moving ? L.T("Arrastra cada isla a una esquina libre y pulsa Confirmar.")
+            move.Mode = moving ? PillMode.Primary : engineOn && !Config.FullBar ? PillMode.Outline : PillMode.Busy;
+            moveRow.Description = moving ? L.T("Arrastra cada isla a un sitio libre y pulsa Confirmar.")
+                : Config.FullBar ? L.T("Con la barra completa las islas no se mueven.")
                 : engineOn ? L.T("Pulsa Mover para poder arrastrarlas a otra esquina de la pantalla.")
                 : L.T("Activa la barra de tareas para poder moverlas.");
             moveRow.Invalidate();
@@ -374,7 +771,7 @@ namespace NeuTaskBar
         protected override void OnLayout(LayoutEventArgs e)
         {
             base.OnLayout(e);
-            card.SetBounds(ContentLeft, HeaderHeight, ContentWidth, card.PreferredHeight);
+            Stack(card);
         }
     }
 
@@ -416,12 +813,12 @@ namespace NeuTaskBar
         protected override void OnLayout(LayoutEventArgs e)
         {
             base.OnLayout(e);
-            card.SetBounds(ContentLeft, HeaderHeight, ContentWidth, card.PreferredHeight);
+            Stack(card);
         }
     }
 
     // Ventana principal: barra lateral de navegación + página activa.
-    sealed class MainForm : Form
+    sealed class MainForm : Form, IMessageFilter
     {
         readonly NavBar nav = new NavBar();
         readonly Panel host = new Panel();
@@ -479,6 +876,17 @@ namespace NeuTaskBar
 
             ApplyScale();
             RefreshState();
+            Application.AddMessageFilter(this);
+        }
+
+        // La rueda del ratón desplaza la página que se ve, tenga el foco el control que lo tenga.
+        public bool PreFilterMessage(ref Message m)
+        {
+            if (m.Msg != 0x020A /* WM_MOUSEWHEEL */ || ActiveForm != this) return false;
+            int i = nav.Selected;
+            if (i < 0 || i >= pages.Count) return false;
+            pages[i].Wheel((short)((m.WParam.ToInt64() >> 16) & 0xFFFF));
+            return true;
         }
 
         // Crea las páginas; se rehacen al cambiar de idioma, porque cada una fija sus textos al construirse.
@@ -494,9 +902,14 @@ namespace NeuTaskBar
             home.ToggleRequested += OnToggle;
             AddPage(L.T("Inicio|home"), "", home);
             AddPage(L.T("Apariencia"), "", new AppearancePage());
+            AddPage(L.T("Aplicaciones"), "\uE71D", new AppsPage());
+            AddPage(L.T("Información"), "\uE823", new InfoPage());
+            AddPage(L.T("Comportamiento"), "\uE7C9", new BehaviorPage());
             AddPage(L.T("Posición"), "\uE7C2", new PositionPage());
+            AddPage(L.T("Temas"), "\uE771", new ThemesPage());
             AddPage(L.T("Acerca de"), "", new AboutPage());
             home.LanguageChanged += () => BeginInvoke((Action)BuildPages);
+            foreach (var p in pages) p.SettingsReplaced += () => BeginInvoke((Action)BuildPages);
             ShowPage(selected);
             foreach (var p in pages) p.PerformLayout();
             Publish();
@@ -603,7 +1016,7 @@ namespace NeuTaskBar
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { poll.Dispose(); if (logo != null) logo.Dispose(); }
+            if (disposing) { Application.RemoveMessageFilter(this); poll.Dispose(); if (logo != null) logo.Dispose(); }
             base.Dispose(disposing);
         }
     }

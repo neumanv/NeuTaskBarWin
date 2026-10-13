@@ -48,6 +48,16 @@ namespace NeuTaskBar
         int dragStartX;
         float dragOffset, slotsX0, slotsX1;
         bool labelsShown;               // las etiquetas caben y se dibujan
+        bool hasHead;                   // hay Inicio o algún botón de Windows delante de las apps
+
+        public Action<AppItem, bool> OnItemWheel;   // rueda sobre una app (true = hacia arriba)
+        public Action<AppItem, int, int> OnGroupClick;   // clic en un grupo de apps y el centro de su botón en pantalla
+
+        // Velo de una celda al pasar el ratón: las apps lo cambian por la ampliación del icono si así se ha elegido.
+        static float HoverVeil(bool app)
+        {
+            return Config.HoverEffect == 2 || (app && Config.HoverEffect == 1) ? 0f : 0.16f;
+        }
 
         public LeftIsland() : base(false)
         {
@@ -88,8 +98,9 @@ namespace NeuTaskBar
             idx -= tools.Count;
             if (idx < 0 || idx >= tipItems.Count) return "";
             var it = tipItems[idx];
-            // Las apps abiertas muestran la vista previa de ventanas en lugar del tooltip.
-            return it == null || it.Running ? "" : it.Name;
+            // Las apps abiertas muestran la vista previa de ventanas en lugar del tooltip (si no se han quitado).
+            // Un grupo no tiene vista previa: siempre enseña los nombres de sus apps.
+            return it == null || (it.Running && Config.Previews && it.Members == null) ? "" : it.Name;
         }
 
         // ------------------------------------------------------------------ modelo
@@ -162,10 +173,11 @@ namespace NeuTaskBar
             return unit;
         }
 
+        // Ancho de la cabecera: Inicio (si no se ha quitado) y los botones de Windows. Sin ninguno de ellos vale 0.
         float HeadWidth(float unit, float gap)
         {
-            float head = unit;
-            foreach (var t in tools) head += gap + ToolWidth(t.Id, unit);
+            float head = Config.HideStart ? 0f : unit;
+            foreach (var t in tools) head += (head > 0f ? gap : 0f) + ToolWidth(t.Id, unit);
             return head;
         }
 
@@ -173,12 +185,13 @@ namespace NeuTaskBar
         // (para "Combinar botones y ocultar etiquetas: cuando la barra esté llena").
         public bool FitsUncombined(int labeled, int plain)
         {
-            float pad = S(6), gap = S(2), sep = S(12);
+            float pad = S(6), gap = S(Config.IconGap), sep = S(12);
             float cw = Small ? SmallCellW : NormalCellW;
             int n = labeled + plain;
             if (n == 0) return true;
             float lw = Vert ? cw : S(110);
-            return pad * 2 + HeadWidth(NormalCellW, gap) + sep + plain * cw + labeled * lw + (n - 1) * gap <= MaxWidth;
+            float head = HeadWidth(NormalCellW, gap);
+            return pad * 2 + head + (head > 0f ? sep : 0f) + plain * cw + labeled * lw + (n - 1) * gap <= MaxWidth;
         }
 
         bool HasLabel(Cell c) { return c.Item != null && !string.IsNullOrEmpty(c.Item.Label); }
@@ -186,13 +199,15 @@ namespace NeuTaskBar
         void LayoutInternal(bool snap)
         {
             float h = BarH;
-            float pad = S(6), gap = S(2), sep = S(12);
+            float pad = S(6), gap = S(Config.IconGap), sep = S(12);
             cellH = h - Inset * 2;
-            startW = cellH;
+            startW = Config.HideStart ? 0f : cellH;
             int n = 0, nLab = 0;
             foreach (var c in cells) if (!c.Dying) { n++; if (HasLabel(c) && !Vert) nLab++; }
 
-            float head = HeadWidth(startW, gap);
+            float head = HeadWidth(cellH, gap);
+            hasHead = head > 0f;
+            if (!hasHead) sep = 0f;   // sin cabecera no hay nada que separar de las apps
             float fixedW = pad + head + pad + (n > 0 ? sep + (n - 1) * gap : 0);
             FullAtNormalSize = fixedW + n * NormalCellW > MaxWidth;
 
@@ -213,16 +228,19 @@ namespace NeuTaskBar
                 labW = cellW;
                 total = fixedW + n * cellW;
             }
+            // Anchura mínima: la isla no baja de ahí aunque haya pocas apps (ni pasa de lo que cabe).
+            total = Math.Max(total, Math.Min(S(Config.MinWidth), MaxWidth));
 
             start.X = new Ease(pad);
             start.W = new Ease(startW);
             float tx = pad + startW;
             for (int i = 0; i < tools.Count; i++)
             {
-                float tw = ToolWidth(tools[i].Id, startW);
-                tools[i].X = new Ease(tx + gap);
+                float tw = ToolWidth(tools[i].Id, cellH);
+                if (tx > pad) tx += gap;
+                tools[i].X = new Ease(tx);
                 tools[i].W = new Ease(tw);
-                tx += gap + tw;
+                tx += tw;
             }
             sepX = pad + head + sep / 2f;
 
@@ -256,12 +274,19 @@ namespace NeuTaskBar
             Invalidate();
         }
 
+        const int MaxMarks = 4;   // marcas de app abierta que se dibujan como mucho, tenga las ventanas que tenga
+
+        // Marcas bajo el icono: una por ventana abierta de la app, hasta MaxMarks.
+        static int MarkCount(AppItem it) { return Math.Max(1, Math.Min(MaxMarks, it.Windows.Count)); }
+
+        // Ancho de cada línea de la marca: la de la app activa se alarga (menos si hay varias, para que quepan).
         float IndicatorWidth(Cell c)
         {
             var it = c.Item;
             if (it == null) return 0f;
-            if (it.Active || it.Flashing) return S(16) * Shrink;
-            return (it.Windows.Count > 1 ? S(10) : S(6)) * Shrink;
+            bool wide = it.Active || it.Flashing;
+            if (MarkCount(it) > 1) return (wide ? S(8) : S(5)) * Shrink;
+            return (wide ? S(16) : S(6)) * Shrink;
         }
 
         void RebuildTips()
@@ -304,7 +329,24 @@ namespace NeuTaskBar
         {
             float x, y, w, h;
             MapRect(u, v, size, size, out x, out y, out w, out h);
-            Gfx.DrawImage(g, img, x, y, size, size, alpha);
+            Gfx.DrawImage(g, img, x, y, size, size, alpha, Config.MonoIcons);
+        }
+
+        // Botón de un grupo: una baldosa con los iconos de sus apps en miniatura, de dos en dos (como se leen: de
+        // izquierda a derecha y de arriba abajo, también en barras verticales).
+        void DrawGroup(IntPtr g, AppItem group, float u, float v, float size, float alpha)
+        {
+            float x, y, w, h;
+            MapRect(u, v, size, size, out x, out y, out w, out h);
+            Gfx.FillRound(g, x, y, size, size, size * 0.24f, Veil(0.15f * alpha));
+            float pad = size * 0.11f, gap = size * 0.08f, mini = (size - pad * 2f - gap) / 2f;
+            for (int i = 0; i < group.Members.Count && i < 4; i++)
+            {
+                float mx = x + pad + (i % 2) * (mini + gap), my = y + pad + (i / 2) * (mini + gap);
+                var img = group.Members[i].Image;
+                if (img != null) Gfx.DrawImage(g, img, mx, my, mini, mini, alpha, Config.MonoIcons);
+                else Gfx.FillRound(g, mx, my, mini, mini, mini * 0.25f, Veil(0.3f * alpha));
+            }
         }
 
         // true si el borde de pantalla queda hacia v grande (abajo o derecha): ahí va el indicador de la app.
@@ -495,14 +537,21 @@ namespace NeuTaskBar
                 if (hit == null || hit != was) return;
                 if (hit == start) { if (OnStartClick != null) OnStartClick(); return; }
                 if (hit.Item == null) { if (OnToolClick != null) OnToolClick(hit.Id); return; }
+                if (hit.Item.Members != null)
+                {
+                    // Un grupo no se abre: despliega sus apps.
+                    var gr = CellScreenRect(hit);
+                    if (OnGroupClick != null) OnGroupClick(hit.Item, (gr.Left + gr.Right) / 2, (gr.Top + gr.Bottom) / 2);
+                    return;
+                }
                 BeginLaunchBounce(hit);
                 if (OnItemClick != null && hit.Item != null) OnItemClick(hit.Item);
             }
             else if (button == 1)
             {
-                if (hit != null && hit != start && hit.Item != null)
+                if (hit != null && hit != start && hit.Item != null && hit.Item.Members == null)
                 {
-                    BeginLaunchBounce(hit, true);
+                    if (Config.MiddleClick == 0) BeginLaunchBounce(hit, true);
                     if (OnItemMiddle != null) OnItemMiddle(hit.Item);
                 }
             }
@@ -523,13 +572,18 @@ namespace NeuTaskBar
         // Al lanzar una app que aún no tiene ventana, el icono rebota hasta que aparece.
         void BeginLaunchBounce(Cell c, bool force)
         {
-            if (c.Item == null || (c.Item.Running && !force)) return;
+            if (!Config.LaunchBounce || Ease.Instant || c.Item == null || c.Item.Members != null || (c.Item.Running && !force)) return;
             c.Launching = true;
             c.LaunchStart = Stopwatch.GetTimestamp();
             StartAnim();
         }
 
         void BeginLaunchBounce(Cell c) { BeginLaunchBounce(c, false); }
+
+        protected override void OnWheel(int delta)
+        {
+            if (hoverCell != null && hoverCell.Item != null && hoverCell.Item.Members == null && OnItemWheel != null) OnItemWheel(hoverCell.Item, delta > 0);
+        }
 
         protected override IntPtr WndProc(uint msg, IntPtr wParam, IntPtr lParam)
         {
@@ -575,7 +629,7 @@ namespace NeuTaskBar
             var glyphs = new List<Fallback>();
             foreach (var t in tools) DrawTool(g, t, top, radius, glyphs, labels);
 
-            if (cells.Count > 0)
+            if (cells.Count > 0 && hasHead)
             {
                 float sepInset = S(14) * shrink;
                 FillRectL(g, sepX, sepInset, Math.Max(1, S(1) * 0.9f), BarH - sepInset * 2, Veil(0.22f));
@@ -594,10 +648,11 @@ namespace NeuTaskBar
                 float ease = 1f - (1f - appear) * (1f - appear);
                 float box = c.X.V;
 
-                float fill = Math.Max(c.Active.V * 0.11f, c.Hover.V * 0.16f) * (1f - 0.45f * c.Press.V);
+                float fill = Math.Max(c.Active.V * 0.11f, c.Hover.V * HoverVeil(true)) * (1f - 0.45f * c.Press.V);
                 FillRoundL(g, box, top, cw, cellH, radius, Veil(fill * appear));
 
                 float scale = (0.55f + 0.45f * ease) * (1f - 0.14f * c.Press.V);
+                if (Config.HoverEffect == 1) scale *= 1f + 0.16f * c.Hover.V;
                 float size = px * scale;
                 // Con etiqueta: icono a la izquierda y título de la ventana a continuación.
                 bool labeled = labelsShown && HasLabel(c) && !Vert && cw > cellH + S(24);
@@ -617,23 +672,46 @@ namespace NeuTaskBar
                     double p = (t % 0.9) / 0.9;
                     iy += away * (float)(4.0 * p * (1.0 - p)) * S(9) * shrink;
                 }
-                if (it != null && it.Image != null) ImageL(g, it.Image, ix, iy, size, ease);
+                if (it != null && it.Members != null)
+                {
+                    // Grupo: una baldosa algo mayor que un icono, con sus apps en miniatura. Va centrada en la celda (no
+                    // se aparta del borde como los iconos, porque debajo no lleva marca).
+                    float gs = Math.Max(size, Math.Min(size * 1.3f, Math.Min(iconSlot, cellH) - S(9)));
+                    DrawGroup(g, it, box + (iconSlot - gs) / 2f, top + (cellH - gs) / 2f, gs, ease);
+                }
+                else if (it != null && it.Image != null) ImageL(g, it.Image, ix, iy, size, ease);
                 else if (appear > 0.4f)
                 {
                     FillRoundL(g, ix, iy, size, size, S(5), Veil(0.27f * ease));
                     fallbacks.Add(new Fallback { R = MapRectI(ix, iy, size, size), Name = it == null ? "" : it.Name });
                 }
 
-                if (c.IndOn.V > 0.01f && it != null)
+                // Un grupo no lleva marcas: las de sus apps están dentro, al desplegarlo.
+                if (c.IndOn.V > 0.01f && it != null && it.Members == null && Config.Indicator != 2)
                 {
-                    float bw = Math.Max(2f, c.IndW.V);
-                    float bh = Math.Max(2f, S(3));
-                    float bx = box + (iconSlot - bw) / 2f;
+                    // Una marca por ventana abierta (hasta MaxMarks), en fila y centradas bajo el icono: líneas, que se
+                    // alargan con la app activa, o puntos si así se ha elegido.
+                    bool dot = Config.Indicator == 1;
+                    int marks = MarkCount(it);
+                    float bh = dot ? Math.Max(3f, S(4) * shrink) : Math.Max(2f, S(3));
+                    float bw = dot ? bh : Math.Max(2f, c.IndW.V);
+                    float mgap = Math.Max(2f, S(3) * shrink);
+                    // En una celda estrecha se encogen (y se juntan) lo justo para caber todas.
+                    float room = iconSlot - S(6);
+                    if (marks * bw + (marks - 1) * mgap > room)
+                    {
+                        mgap = Math.Min(mgap, 2f);
+                        bw = Math.Max(1f, (room - (marks - 1) * mgap) / marks);
+                        if (dot) bh = Math.Min(bh, Math.Max(2f, bw));
+                    }
+                    float bx = box + (iconSlot - (marks * bw + (marks - 1) * mgap)) / 2f;
                     float by = EdgeFar ? top + cellH - bh - S(2) : top + S(2);
                     float a = c.Active.V;
                     int r = (int)(150 + (AccentR - 150) * a), gg = (int)(150 + (AccentG - 150) * a), b = (int)(150 + (AccentB - 150) * a);
                     if (it.Flashing) { r = 255; gg = 176; b = 0; }
-                    FillRoundL(g, bx, by, bw, bh, bh / 2f, Gfx.Argb(c.IndOn.V * appear, r, gg, b));
+                    uint markColor = Gfx.Argb(c.IndOn.V * appear, r, gg, b);
+                    for (int m = 0; m < marks; m++)
+                        FillRoundL(g, bx + m * (bw + mgap), by, bw, bh, bh / 2f, markColor);
                 }
             }
             Gfx.End(g);
@@ -642,7 +720,7 @@ namespace NeuTaskBar
                 Text(f.Name, f.R, Gdi.Font(IsWin11 ? "Segoe Fluent Icons" : "Segoe MDL2 Assets", (int)Math.Round(S(16) * shrink), 400), Ink(255), Gdi.DT_CENTER | Gdi.DT_VCENTER);
 
             foreach (var f in labels)
-                Text(f.Name, f.R, Gdi.Font("Segoe UI", S(12), 400), Ink(245), Gdi.DT_VCENTER | Gdi.DT_END_ELLIPSIS);
+                Text(f.Name, f.R, Gdi.Font("Segoe UI", S(Config.TextSize), 400), Ink(245), Gdi.DT_VCENTER | Gdi.DT_END_ELLIPSIS);
 
             foreach (var f in fallbacks)
             {
@@ -654,7 +732,7 @@ namespace NeuTaskBar
         void DrawTool(IntPtr g, Cell c, float top, float radius, List<Fallback> glyphs, List<Fallback> labels)
         {
             float x = c.X.V, w = c.W.V;
-            float fill = c.Hover.V * 0.16f * (1f - 0.45f * c.Press.V);
+            float fill = c.Hover.V * HoverVeil(false) * (1f - 0.45f * c.Press.V);
             float scale = 1f - 0.12f * c.Press.V;
             RECT pr = MapRectI(x, top, w, cellH);   // celda en coordenadas físicas (el glifo no se transpone)
             if (c.Id == "search" && w > cellH + S(8))
@@ -689,7 +767,8 @@ namespace NeuTaskBar
         void DrawStart(IntPtr g, float top, float radius)
         {
             float x = start.X.V, w = start.W.V;
-            float fill = start.Hover.V * 0.16f * (1f - 0.45f * start.Press.V);
+            if (w < 1f) return;   // sin botón de Inicio
+            float fill = start.Hover.V * HoverVeil(false) * (1f - 0.45f * start.Press.V);
             FillRoundL(g, x, top, w, cellH, radius, Veil(fill));
 
             float scale = 1f - 0.12f * start.Press.V;

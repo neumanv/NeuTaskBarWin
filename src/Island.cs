@@ -47,6 +47,8 @@ namespace NeuTaskBar
         // Color de la isla: tinte del acrílico (AARRGGBB), o transparente del todo si su alfa es 0.
         uint tint;
         bool tintApplied, clear, darkInk;
+        int inkMode;                    // tinta con la que se aplicó el color (Config.InkMode)
+        public bool Outline;            // contorno fino alrededor de la isla
         bool tracking;
         bool shown;
 
@@ -283,11 +285,13 @@ namespace NeuTaskBar
         // el fondo de escritorio: se ve lo que haya detrás). El contenido pasa a tinta oscura si el color es claro.
         public void SetTint(uint t)
         {
-            if (tintApplied && t == tint) return;
+            if (tintApplied && t == tint && inkMode == Config.InkMode) return;
             tint = t;
             tintApplied = true;
+            inkMode = Config.InkMode;
             clear = (t >> 24) == 0;
-            if (!clear)
+            if (inkMode != 0) darkInk = inkMode == 2;   // tinta elegida a mano
+            else if (!clear)
             {
                 float a = (t >> 24) / 255f;
                 float lum = (0.299f * ((t >> 16) & 255) + 0.587f * ((t >> 8) & 255) + 0.114f * (t & 255)) / 255f;
@@ -309,7 +313,7 @@ namespace NeuTaskBar
         // maximizada). Se mira la franja de la isla que da al centro de la pantalla, donde no se dibuja nada.
         public void WatchBackdrop()
         {
-            if (!clear || !shown || autoHidden || hideE.V > 0.01f || Hwnd == IntPtr.Zero) return;
+            if (!clear || inkMode != 0 || !shown || autoHidden || hideE.V > 0.01f || Hwnd == IntPtr.Zero) return;
             RECT r = rest;
             int skip = S(12), band = Math.Max(1, Math.Min(2, Inset));
             if (Vert)
@@ -357,16 +361,27 @@ namespace NeuTaskBar
             return darkInk ? Gfx.Argb(alpha * 0.7f, 0, 0, 0) : Gfx.Argb(alpha, 255, 255, 255);
         }
 
-        // Color de acento (logo de Inicio, indicador de la ventana activa).
-        protected int AccentR { get { return darkInk ? 0 : 76; } }
-        protected int AccentG { get { return darkInk ? 95 : 194; } }
-        protected int AccentB { get { return darkInk ? 184 : 255; } }
+        // Color de acento (logo de Inicio, indicador de la ventana activa): el elegido en la aplicación o, si no se ha
+        // elegido ninguno, un azul que se lee bien sobre la tinta de la isla.
+        protected int AccentR { get { uint a = Config.Accent; return a != 0 ? (int)((a >> 16) & 255) : darkInk ? 0 : 76; } }
+        protected int AccentG { get { uint a = Config.Accent; return a != 0 ? (int)((a >> 8) & 255) : darkInk ? 95 : 194; } }
+        protected int AccentB { get { uint a = Config.Accent; return a != 0 ? (int)(a & 255) : darkInk ? 184 : 255; } }
         protected uint Accent(float alpha) { return Gfx.Argb(alpha, AccentR, AccentG, AccentB); }
 
         // Acrílico con el tinte indicado (AARRGGBB). dark = esquema oscuro de DWM; noBorder = sin borde del sistema.
         public static void ApplyAcrylic(IntPtr hwnd, uint t, bool dark, bool noBorder)
         {
             ApplyAccent(hwnd, 4 /* ACCENT_ENABLE_ACRYLICBLURBEHIND */, t, dark, noBorder);
+        }
+
+        // El mismo acrílico para una ventana que no es una isla (el relleno de la franja): sin esquinas redondeadas ni
+        // borde. on = false se lo quita.
+        public static void SetPlainAcrylic(IntPtr hwnd, bool on, uint t)
+        {
+            ApplyAccent(hwnd, on ? 4 /* ACCENT_ENABLE_ACRYLICBLURBEHIND */ : 0 /* ACCENT_DISABLED */, t, true, true);
+            if (!IsWin11) return;
+            int square = 1; // DWMWCP_DONOTROUND
+            Native.DwmSetWindowAttribute(hwnd, Native.DWMWA_WINDOW_CORNER_PREFERENCE, ref square, 4);
         }
 
         static void ApplyAccent(IntPtr hwnd, int state, uint t, bool dark, bool noBorder)
@@ -629,6 +644,14 @@ namespace NeuTaskBar
                 surface.Resize(dc, w, h);
                 Gdi.FillRectColor(surface.Dc, new RECT(0, 0, w, h), 0);
                 OnPaintContent(surface.Dc);
+                if (Outline)
+                {
+                    // Sigue las esquinas que redondea DWM en Windows 11. Los lados pegados al borde de la pantalla
+                    // quedan fuera de ella con sus salientes, así que ahí no se ve.
+                    IntPtr g = surface.BeginGraphics();
+                    Gfx.StrokeRound(g, 0, 0, w, h, IsWin11 ? S(8) : 0, Math.Max(1, S(1)), darkInk ? Gfx.Argb(0.30f, 0, 0, 0) : Gfx.Argb(0.34f, 255, 255, 255));
+                    Gfx.End(g);
+                }
                 if (Movable)
                 {
                     // Modo mover: un velo sobre toda la isla avisa de que ahora se arrastra.
@@ -655,7 +678,14 @@ namespace NeuTaskBar
         // superficie aparte y esa cobertura se compone sobre la isla con el color pedido. Llamar después de End(g).
         protected void Text(string s, RECT r, IntPtr font, int rgb, uint flags)
         {
-            if (string.IsNullOrEmpty(s) || surface.Dc == IntPtr.Zero) return;
+            Text(s, r, font, rgb, flags, 1f);
+        }
+
+        // alpha = opacidad del texto (para fundir uno con otro).
+        protected void Text(string s, RECT r, IntPtr font, int rgb, uint flags, float alpha)
+        {
+            int a256 = (int)Math.Round(Math.Max(0f, Math.Min(1f, alpha)) * 256f);
+            if (string.IsNullOrEmpty(s) || surface.Dc == IntPtr.Zero || a256 == 0) return;
             int W = surface.W, H = surface.H;
             r = new RECT(r.Left + ovL, r.Top + ovT, r.Right + ovL, r.Bottom + ovT);
             int x0 = Math.Max(0, r.Left), y0 = Math.Max(0, r.Top), x1 = Math.Min(W, r.Right), y1 = Math.Min(H, r.Bottom);
@@ -678,7 +708,7 @@ namespace NeuTaskBar
                 Marshal.Copy(dest, destRow, 0, n);
                 for (int i = 0; i < n; i++)
                 {
-                    int c = (textRow[i] >> 8) & 255;
+                    int c = (((textRow[i] >> 8) & 255) * a256) >> 8;
                     if (c == 0) continue;
                     int d = destRow[i], k = 255 - c;
                     destRow[i] = ((c + ((d >> 24) & 255) * k / 255) << 24) | (((cr * c + ((d >> 16) & 255) * k) / 255) << 16)

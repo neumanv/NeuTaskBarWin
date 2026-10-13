@@ -336,7 +336,7 @@ namespace NeuTaskBar
 
                 float iy = r.Top + (r.Height - iconS) / 2f;
                 if (d.Image != null) Gfx.DrawImage(g, d.Image, padX, iy, iconS, iconS, 1f);
-                else if (!string.IsNullOrEmpty(d.Glyph)) Gfx.Text(g, d.Glyph, IconFont, F(16), false, text, padX, iy, iconS, iconS, 1);
+                else if (!string.IsNullOrEmpty(d.Glyph)) Gfx.Glyph(g, d.Glyph, IconFont, F(16), text, padX, iy, iconS, iconS);
 
                 float tx = padX + iconS + gap;
                 Gfx.Text(g, d.Text, TextFont, F(13.3f), false, text, tx, r.Top, w - tx - padX, r.Height, 0);

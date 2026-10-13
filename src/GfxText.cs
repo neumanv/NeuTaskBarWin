@@ -89,6 +89,30 @@ namespace NeuTaskBar
             GdipDrawString(g, s, -1, font, ref r, stringFormat, brush);
         }
 
+        static IntPtr glyphFormat;
+
+        // Un glifo de la fuente de iconos, centrado en su caja y sin recortar lo que sobresalga de ella: muchos
+        // iconos se salen un píxel de su cuadro por arriba o por la izquierda, y con Text (que recorta al rectángulo)
+        // perdían ese trozo.
+        public static void Glyph(IntPtr g, string s, string family, float px, uint argb, float x, float y, float w, float h)
+        {
+            if (string.IsNullOrEmpty(s) || (argb >> 24) == 0) return;
+            IntPtr font = TextFont(family, px, false);
+            if (font == IntPtr.Zero) return;
+            if (glyphFormat == IntPtr.Zero)
+            {
+                GdipCreateStringFormat(0, 0, out glyphFormat);
+                GdipSetStringFormatFlags(glyphFormat, 0x1000 /* NoWrap */ | 0x4000 /* NoClip */);
+                GdipSetStringFormatTrimming(glyphFormat, 0 /* None */);
+                GdipSetStringFormatAlign(glyphFormat, 1 /* Center */);
+                GdipSetStringFormatLineAlign(glyphFormat, 1 /* Center */);
+            }
+            GdipSetTextRenderingHint(g, 4 /* AntiAlias */);
+            GdipSetSolidFillColor(brush, argb);
+            var r = new RectF(x, y, w, h);
+            GdipDrawString(g, s, -1, font, ref r, glyphFormat, brush);
+        }
+
         public static float TextWidth(IntPtr g, string s, string family, float px, bool bold)
         {
             IntPtr font = TextFont(family, px, bold);

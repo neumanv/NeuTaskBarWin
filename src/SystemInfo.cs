@@ -180,6 +180,39 @@ namespace NeuTaskBar
         }
     }
 
+    // Uso del procesador (medido entre dos lecturas) y de la memoria, en tanto por ciento.
+    sealed class SysStats
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct MEMORYSTATUSEX
+        {
+            public uint dwLength, dwMemoryLoad;
+            public ulong ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile, ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+        }
+
+        [DllImport("kernel32.dll")] static extern bool GetSystemTimes(out long idle, out long kernel, out long user);
+        [DllImport("kernel32.dll")] static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX m);
+
+        long lastIdle, lastTotal;
+        public int Cpu, Ram;
+
+        public void Sample()
+        {
+            long idle, kernel, user;
+            if (GetSystemTimes(out idle, out kernel, out user))
+            {
+                long total = kernel + user;   // el tiempo de núcleo ya incluye el de inactividad
+                long dt = total - lastTotal, di = idle - lastIdle;
+                if (lastTotal != 0 && dt > 0) Cpu = (int)Math.Max(0, Math.Min(100, Math.Round(100.0 * (dt - di) / dt)));
+                lastIdle = idle;
+                lastTotal = total;
+            }
+            var m = new MEMORYSTATUSEX();
+            m.dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+            if (GlobalMemoryStatusEx(ref m)) Ram = (int)m.dwMemoryLoad;
+        }
+    }
+
     struct BatteryState
     {
         public bool Present;

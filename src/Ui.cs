@@ -373,13 +373,16 @@ namespace NeuTaskBar
 
         public int Selected { get { return selected; } set { selected = value; Invalidate(); } }
 
-        public SegmentedPicker(string[] options)
+        public SegmentedPicker(string[] options) : this(options, 88) { }
+
+        // segment = ancho de cada segmento a 96 dpi (para opciones con el texto más largo de lo habitual).
+        public SegmentedPicker(string[] options, int segment)
         {
             this.options = options;
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
                 | ControlStyles.ResizeRedraw, true);
             Cursor = Cursors.Hand;
-            Size = new Size(options.Length * Ui.S(88), Ui.S(34));
+            Size = new Size(options.Length * Ui.S(segment), Ui.S(34));
         }
 
         int Hit(Point p)
@@ -431,19 +434,32 @@ namespace NeuTaskBar
     // abre el selector de colores de Windows. El valor es AARRGGBB (alfa 0 = transparente).
     sealed class SwatchPicker : Control
     {
-        const uint Opacity = 0xCC000000;   // opacidad de los colores elegidos aquí (el predeterminado lleva la suya)
-        static readonly uint[] Presets = { 0x8C1A1A1A, Opacity | 0x005FB8, Opacity | 0x0F7B0F, Opacity | 0xC42B1C, Opacity | 0xF3F3F3, 0 };
-        static readonly string[] Names = { "Predeterminado", "Azul", "Verde", "Rojo", "Claro", "Transparente", "Otro color…" };
+        const uint TintOpacity = 0xCC000000;   // opacidad de los colores de isla elegidos aquí (el predeterminado lleva la suya)
+        static readonly uint[] TintPresets = { 0x8C1A1A1A, TintOpacity | 0x005FB8, TintOpacity | 0x0F7B0F, TintOpacity | 0xC42B1C, TintOpacity | 0xF3F3F3, 0 };
+        static readonly string[] TintNames = { "Predeterminado", "Azul", "Verde", "Rojo", "Claro", "Transparente", "Otro color…" };
 
         public event Action<uint> ValueChanged;
         readonly ToolTip tip = new ToolTip();
-        uint value = Presets[0];
+        // Colores predefinidos, sus nombres (uno más: el del color a medida), opacidad de los colores a medida y color
+        // con el que se pinta el predefinido 0 (0 = es "sin color" y lleva una raya).
+        readonly uint[] Presets;
+        readonly string[] Names;
+        readonly uint Opacity, zeroFill;
+        uint value;
         int hover = -1;
 
         public uint Value { get { return value; } set { this.value = value; Invalidate(); } }
 
-        public SwatchPicker()
+        // Selector del color de una isla.
+        public SwatchPicker() : this(TintPresets, TintNames, TintOpacity, 0) { }
+
+        public SwatchPicker(uint[] presets, string[] names, uint opacity, uint zeroFill)
         {
+            Presets = presets;
+            Names = names;
+            Opacity = opacity;
+            this.zeroFill = zeroFill;
+            value = presets[0];
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
                 | ControlStyles.ResizeRedraw, true);
             Cursor = Cursors.Hand;
@@ -513,9 +529,9 @@ namespace NeuTaskBar
             for (int i = 0; i < Names.Length; i++)
             {
                 var r = Circle(i);
-                bool custom = i == Presets.Length, none = i < Presets.Length && Presets[i] == 0;
+                bool custom = i == Presets.Length, none = i < Presets.Length && Presets[i] == 0 && zeroFill == 0;
                 Color fill = custom ? (sel == i ? Color.FromArgb(255, Color.FromArgb(unchecked((int)value))) : Color.White)
-                    : none ? Color.White : Color.FromArgb(255, Color.FromArgb(unchecked((int)Presets[i])));
+                    : none ? Color.White : Color.FromArgb(255, Color.FromArgb(unchecked((int)(Presets[i] == 0 ? zeroFill : Presets[i]))));
                 using (var b = new SolidBrush(fill)) g.FillEllipse(b, r);
                 using (var pen = new Pen(Color.FromArgb(200, 200, 206), 1f)) g.DrawEllipse(pen, r);
                 if (none)
@@ -544,6 +560,97 @@ namespace NeuTaskBar
         {
             if (disposing) tip.Dispose();
             base.Dispose(disposing);
+        }
+    }
+
+    // Deslizante: una pista con su tirador y, a la derecha, el valor elegido. Avisa cada vez que el valor cambia.
+    sealed class Slider : Control
+    {
+        public event Action<int> ValueChanged;
+        public Func<int, string> Format = v => v.ToString();
+        readonly int min, max, step;
+        int value;
+        bool drag;
+
+        public int Value { get { return value; } set { this.value = Snap(value); Invalidate(); } }
+
+        public Slider(int min, int max, int step)
+        {
+            this.min = min;
+            this.max = max;
+            this.step = Math.Max(1, step);
+            value = min;
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+                | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            Cursor = Cursors.Hand;
+            TabStop = true;
+            Size = new Size(Ui.S(236), Ui.S(30));
+        }
+
+        int Snap(int v)
+        {
+            v = Math.Max(min, Math.Min(max, v));
+            return Math.Min(max, min + (int)Math.Round((v - min) / (double)step) * step);
+        }
+
+        // Pista: desde el centro del tirador en el mínimo hasta el centro en el máximo; a su derecha queda el valor.
+        int TrackLeft { get { return Ui.S(10); } }
+        int TrackRight { get { return Width - Ui.S(64); } }
+
+        void Set(int v)
+        {
+            v = Snap(v);
+            if (v == value) return;
+            value = v;
+            Invalidate();
+            if (ValueChanged != null) ValueChanged(value);
+        }
+
+        void SetFromX(int x)
+        {
+            double t = (x - TrackLeft) / (double)Math.Max(1, TrackRight - TrackLeft);
+            Set(min + (int)Math.Round(Math.Max(0.0, Math.Min(1.0, t)) * (max - min)));
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left) { drag = true; Focus(); SetFromX(e.X); }
+            base.OnMouseDown(e);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e) { if (drag) SetFromX(e.X); base.OnMouseMove(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { drag = false; base.OnMouseUp(e); }
+
+        protected override bool IsInputKey(Keys keyData)
+        {
+            return keyData == Keys.Left || keyData == Keys.Right || base.IsInputKey(keyData);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Left) { Set(value - step); e.Handled = true; }
+            else if (e.KeyCode == Keys.Right) { Set(value + step); e.Handled = true; }
+            base.OnKeyDown(e);
+        }
+
+        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(BackColor);
+            Ui.Smooth(g);
+            float x0 = TrackLeft, x1 = TrackRight, cy = Height / 2f, th = Ui.S(4);
+            float kx = x0 + (x1 - x0) * (value - min) / (float)Math.Max(1, max - min);
+            Ui.FillRound(g, new RectangleF(x0, cy - th / 2f, x1 - x0, th), th / 2f, Color.FromArgb(209, 209, 215), null);
+            if (kx > x0) Ui.FillRound(g, new RectangleF(x0, cy - th / 2f, kx - x0, th), th / 2f, Ui.Ink, null);
+            float k = Ui.S(16);
+            using (var b = new SolidBrush(Color.White)) g.FillEllipse(b, kx - k / 2f, cy - k / 2f, k, k);
+            using (var pen = new Pen(Ui.Ink, Focused && ShowFocusCues ? Ui.S(3) : Math.Max(1.5f, Ui.S(2)))) g.DrawEllipse(pen, kx - k / 2f, cy - k / 2f, k, k);
+            using (var f = Ui.Font(13, false))
+                Ui.Text(g, Format(value), f, Ui.Ink, new Rectangle((int)x1 + Ui.S(12), 0, Width - (int)x1 - Ui.S(12), Height),
+                    TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
         }
     }
 

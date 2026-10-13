@@ -14,7 +14,7 @@ namespace NeuTaskBar
             WM_APP_CONFIG = Native.WM_APP + 8, WM_APP_MOVE = Native.WM_APP + 9;
 
         const uint T_REFRESH = 1, T_CLOCK = 2, T_SETUP = 3, T_NET = 4, T_TRIM = 5, T_ENTER = 6, T_FLY = 7, T_TOOLS = 8, T_HIDE = 9,
-            T_FILL = 10, T_WATCH = 11;
+            T_FILL = 10, T_WATCH = 11, T_STATS = 12;
 
         static readonly WndProcDelegate HostProcDelegate = StaticHostProc;
         static App instance;
@@ -34,6 +34,7 @@ namespace NeuTaskBar
         PinStore pins;
         WindowTracker tracker;
         VolumeMonitor volume;
+        readonly SysStats stats = new SysStats();
         IntPtr trayIcon;
 
         bool paused, started, islandsHiddenForFullscreen;
@@ -46,18 +47,21 @@ namespace NeuTaskBar
         RECT lastBarRect;
         int lastBarHeight = -1;
         Edge barEdge = Edge.Bottom;         // borde elegido en Windows
-        // Sitio de una isla: borde de pantalla, extremo de ese borde (inicio o final) y, solo la de aplicaciones sin
-        // esquina elegida, centrada como manda la alineación de Windows.
+        // Sitio de una isla: borde de pantalla, extremo de ese borde (inicio o final) y, solo la de aplicaciones,
+        // centrada: porque lo manda la alineación de Windows o porque se ha llevado al centro de arriba o de abajo.
         struct Spot { public Edge Edge; public bool End, Centered; }
         Spot spotL, spotR;
         bool joined, following;             // islas unidas; se está recolocando la que sigue a la otra
+        bool full;                          // barra completa: una sola barra de lado a lado del borde
+        bool OnePiece { get { return joined || full; } }   // las islas van sobre la placa común
+        string openGroup, pressedGroup;     // grupo con el menú de sus apps abierto, y el que lo tenía al pulsar el ratón
         readonly Edge[] strips = new Edge[2];   // bordes con isla (cada uno reserva su franja)
         int stripCount = 1, lastStripSig = -1;
         int layH, layMargin;                // grosor de las islas y margen del último reparto (px)
         bool moveMode;                      // las islas se arrastran (lo activa la aplicación hasta que se confirma)
-        readonly IntPtr[] targets = new IntPtr[4];   // marcas de las esquinas libres mientras se arrastra una isla
-        readonly RECT[] targetRects = new RECT[4];
-        readonly bool[] targetFree = new bool[4];
+        readonly IntPtr[] targets = new IntPtr[Config.SpotCount];   // marcas de los sitios libres mientras se arrastra una isla
+        readonly RECT[] targetRects = new RECT[Config.SpotCount];
+        readonly bool[] targetFree = new bool[Config.SpotCount];
         int targetHot = -1;
         POINT moveOrigin;                   // centro de la isla al empezar a arrastrarla
         int lastEdgeCheck, lastPosChanged;
@@ -80,6 +84,7 @@ namespace NeuTaskBar
         int Main()
         {
             Config.Load();
+            ApplyMotion();
             try { Native.SetPreferredAppMode(1); Native.FlushMenuThemes(); } catch { }
 
             CreateHost();
@@ -116,9 +121,17 @@ namespace NeuTaskBar
             flyout.OnClose = h => Native.PostMessageW(h, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
             menu = new TaskbarMenu();
             menu.Init();
-            left.OnHover = (it, r) => flyout.Hover(it, r);
+            left.OnHover = (it, r) => flyout.Hover(Config.Previews && it != null && it.Members == null ? it : null, r);
+            left.OnGroupClick = GroupOpen;
+            left.OnItemWheel = ItemWheel;
             left.OnReorder = ReorderItems;
-            left.OnAnyMouseDown = right.OnAnyMouseDown = () => menu.Close();
+            left.OnAnyMouseDown = right.OnAnyMouseDown = () =>
+            {
+                // Se recuerda si el menú abierto era el de un grupo: pulsar de nuevo ese grupo lo cierra, no lo reabre.
+                pressedGroup = menu.Visible ? openGroup : null;
+                openGroup = null;
+                menu.Close();
+            };
 
             left.OnStartDown = () => toggleClose = WasOpenAtPress(FlyKind.Start, true);
             left.OnStartClick = () =>
@@ -136,7 +149,7 @@ namespace NeuTaskBar
             ApplyTools();
             left.OnStartContext = () => Native.PressKeys(Native.VK_LWIN, 0x58 /* X */);
             left.OnItemClick = it => { flyout.HideNow(); ItemClick(it); };
-            left.OnItemMiddle = it => { if (!string.IsNullOrEmpty(it.LaunchPath)) Native.Launch(it.LaunchPath, null); };
+            left.OnItemMiddle = ItemMiddle;
             left.OnItemContext = (it, x, y) => { flyout.HideNow(); ItemContext(it, x, y); };
             left.OnBlankContext = (x, y) => ShowTaskbarMenu(x, y);
             left.OnFilesDropped = FilesDropped;
@@ -169,6 +182,9 @@ namespace NeuTaskBar
                 Native.Launch(tip, null);
             };
             right.OnDesktopClick = () => Native.PressKeys(Native.VK_LWIN, 0x44 /* D */);
+            right.OnStatsClick = () => Native.Launch("taskmgr.exe", null);
+            // Teclas multimedia: las atiende el reproductor que esté sonando.
+            right.OnMediaClick = i => Native.PressKeys(i == 0 ? (byte)0xB1 /* anterior */ : i == 1 ? (byte)0xB3 /* reproducir o pausar */ : (byte)0xB0 /* siguiente */);
             right.OnVolumeWheel = delta => { volume.Step(delta > 0); right.Refresh(); };
             right.OnSysContext = SysContext;
             right.OnClockContext = ClockContext;
@@ -215,9 +231,9 @@ namespace NeuTaskBar
 
         // Islas que se esconden: las dos con "Ocultar automáticamente la barra de tareas" de Windows, o cada una por su
         // cuenta con los interruptores de Apariencia.
-        // Unidas forman una sola barra: se esconde entera con que se haya pedido esconder una de las dos.
-        static bool HidesLeft { get { return Config.AutoHide || Config.HideLeft || (Config.Join && Config.HideRight); } }
-        static bool HidesRight { get { return Config.AutoHide || Config.HideRight || (Config.Join && Config.HideLeft); } }
+        // Unidas (o en la barra completa) forman una sola barra: se esconde entera con que se haya pedido esconder una de las dos.
+        static bool HidesLeft { get { return Config.AutoHide || Config.HideLeft || (Config.OneBar && Config.HideRight); } }
+        static bool HidesRight { get { return Config.AutoHide || Config.HideRight || (Config.OneBar && Config.HideLeft); } }
 
         // Ocultación: arranca o detiene la vigilancia del cursor y deja a la vista las islas que no se esconden.
         // Mientras se mueven las islas no se esconde ninguna.
@@ -264,20 +280,21 @@ namespace NeuTaskBar
             else
             {
                 // La franja sigue reservada, así que en el sitio de la isla escondida no hay nada más: basta con pasar por él.
-                bool overLeft = OverIsland(left, p), overRight = OverIsland(right, p);
+                // (La barra completa ocupa todo el borde: vale cualquier punto de él.)
+                bool overLeft = full || OverIsland(left, p), overRight = full || OverIsland(right, p);
                 wantLeft = (inside && dl < barThick && overLeft) || flyout.Visible || start;
                 wantRight = (inside && dr < barThick && overRight) || panels;
                 holdLeft = (inside && dl <= zone && overLeft) || menu.Visible;
                 holdRight = (inside && dr <= zone && overRight) || menu.Visible;
             }
-            if (joined)
+            if (OnePiece)
             {
                 wantLeft = wantRight = wantLeft || wantRight;
                 holdLeft = holdRight = holdLeft || holdRight;
             }
             if (HidesLeft && HideStep(left, ref leftRevealed, ref leftWantedTick, wantLeft, holdLeft)) flyout.HideNow();
             if (HidesRight) HideStep(right, ref rightRevealed, ref rightWantedTick, wantRight, holdRight);
-            if (joined) plate.SetAutoHidden(!leftRevealed, hideDist);
+            if (OnePiece) plate.SetAutoHidden(!leftRevealed, hideDist);
         }
 
         // El cursor está en el tramo de la barra que ocupa la isla (con un pequeño margen a los lados).
@@ -303,7 +320,7 @@ namespace NeuTaskBar
                     isl.RaiseTopmost();
                 }
             }
-            else if (revealed && (now - wantedTick > 450 || now < wantedTick))
+            else if (revealed && (now - wantedTick > Config.HideDelay || now < wantedTick))
             {
                 revealed = false;
                 isl.SetAutoHidden(true, hideDist);
@@ -323,39 +340,73 @@ namespace NeuTaskBar
         void ReloadConfig()
         {
             Config.Load();
+            ApplyMotion();
             ApplyTints();
             UpdateTrayTip();   // por si ha cambiado el idioma
+            if (!Config.Previews) flyout.HideNow();
+            if (Config.FullBar) SetMoveMode(false);
+            pins.LoadGroups();   // la aplicación puede haber deshecho los grupos
             if (paused) return;
+            ApplyStats();
+            right.UpdateClock();   // por si ha cambiado el formato de la hora o de la fecha
             lastBarHeight = -1;
             lastSig = "";
             ApplyLayout();
             UpdateAutoHide();
         }
 
-        // Color de cada isla. Unidas, el color lo lleva la placa (el de la isla de aplicaciones) y las dos islas van
-        // transparentes encima de ella.
+        // Color de cada isla (el elegido, o el del tema de Windows si se sigue). Unidas o en la barra completa, el color
+        // lo lleva la placa (el de la isla de aplicaciones) y las dos islas van transparentes encima de ella.
         void ApplyTints()
         {
-            if (Config.Join)
+            uint tl = Config.IslandTint(Config.TintLeft), tr = Config.IslandTint(Config.TintRight);
+            if (Config.OneBar)
             {
-                plate.SetTint(Config.TintLeft);
+                plate.SetTint(tl);
                 left.SetTint(0);
                 right.SetTint(0);
                 if (!plate.Clear) { left.AdoptInk(plate); right.AdoptInk(plate); }
             }
             else
             {
-                left.SetTint(Config.TintLeft);
-                right.SetTint(Config.TintRight);
+                left.SetTint(tl);
+                right.SetTint(tr);
             }
+            // El contorno lo lleva cada isla o, unidas, la placa que hace de fondo de las dos.
+            left.Outline = right.Outline = Config.Border && !Config.OneBar;
+            plate.Outline = Config.Border && Config.OneBar;
+            left.Invalidate();
+            right.Invalidate();
+            plate.Invalidate();
+        }
+
+        // Animaciones: ninguna si así se ha elegido, o mientras el equipo va con batería si se ha pedido eso.
+        void ApplyMotion()
+        {
+            bool calm = Config.ReduceMotion;
+            if (!calm && Config.CalmOnBattery)
+            {
+                var b = BatteryState.Read();
+                calm = b.Present && !b.AcPower;
+            }
+            Ease.Instant = calm;
+        }
+
+        // Uso del procesador y de la memoria: solo se mide mientras se muestra alguno de los dos.
+        void ApplyStats()
+        {
+            if (paused || !(Config.ShowCpu || Config.ShowRam)) { Native.KillTimer(host, new UIntPtr(T_STATS)); return; }
+            stats.Sample();
+            right.UpdateStats(stats.Cpu, stats.Ram);
+            Native.SetTimer(host, new UIntPtr(T_STATS), 2000, IntPtr.Zero);
         }
 
         void ShowIslands(bool show)
         {
             left.Show(show);
             right.Show(show);
-            plate.Show(show && joined);
-            if (show && joined) plate.PlaceBehind(left.Hwnd);
+            plate.Show(show && OnePiece);
+            if (show && OnePiece) plate.PlaceBehind(left.Hwnd);
         }
 
         // Por encima de las demás ventanas, con la de información sobre la de aplicaciones y la placa bajo las dos.
@@ -363,7 +414,7 @@ namespace NeuTaskBar
         {
             left.RaiseTopmost();
             right.RaiseTopmost();
-            if (joined) plate.PlaceBehind(left.Hwnd);
+            if (OnePiece) plate.PlaceBehind(left.Hwnd);
         }
 
         // ------------------------------------------------------------------ mover las islas
@@ -371,7 +422,7 @@ namespace NeuTaskBar
         // La aplicación abre y cierra el modo mover: mientras dura, las islas se arrastran a la esquina que se quiera.
         void SetMoveMode(bool on)
         {
-            if (on && paused) on = false;
+            if (on && (paused || Config.FullBar)) on = false;   // la barra completa no tiene islas que mover
             if (on == moveMode) return;
             moveMode = on;
             left.Movable = right.Movable = on;
@@ -384,7 +435,8 @@ namespace NeuTaskBar
         }
 
         // Esquina (0 arriba-izq., 1 arriba-dcha., 2 abajo-izq., 3 abajo-dcha.) que ocupa un sitio, y al revés. Las islas
-        // van tumbadas o de pie como la barra de Windows.
+        // van tumbadas o de pie como la barra de Windows. Los sitios 4 y 5 son el centro de arriba y el de abajo: solo
+        // existen con las islas tumbadas (de pie, la isla se centra en el borde de la barra de Windows).
         static bool IsVert(Edge e) { return e == Edge.Left || e == Edge.Right; }
 
         static int CornerOf(Spot s)
@@ -397,7 +449,12 @@ namespace NeuTaskBar
         {
             bool right = (corner & 1) != 0, bottom = (corner & 2) != 0;
             var s = new Spot();
-            if (IsVert(barEdge)) { s.Edge = right ? Edge.Right : Edge.Left; s.End = bottom; }
+            if (corner >= Config.CornerCount)
+            {
+                s.Edge = IsVert(barEdge) ? barEdge : corner == 5 ? Edge.Bottom : Edge.Top;
+                s.Centered = true;
+            }
+            else if (IsVert(barEdge)) { s.Edge = right ? Edge.Right : Edge.Left; s.End = bottom; }
             else { s.Edge = bottom ? Edge.Bottom : Edge.Top; s.End = right; }
             return s;
         }
@@ -408,8 +465,15 @@ namespace NeuTaskBar
         {
             spotL = Config.CornerLeft >= 0 ? SpotAt(Config.CornerLeft) : new Spot { Edge = barEdge, Centered = Config.Center };
             spotR = Config.CornerRight >= 0 ? SpotAt(Config.CornerRight) : new Spot { Edge = barEdge, End = true };
-            joined = Config.Join;
-            if (joined) { spotR = spotL; spotR.Centered = false; }
+            full = Config.FullBar;
+            joined = Config.Join && !full;
+            if (full)
+            {
+                // Barra completa, como la de Windows: en su borde, las apps al inicio o centradas y la información al final.
+                spotL = new Spot { Edge = barEdge, Centered = Config.Center };
+                spotR = new Spot { Edge = barEdge, End = true };
+            }
+            else if (joined) { spotR = spotL; spotR.Centered = false; }
             else if (!spotL.Centered && CornerOf(spotL) == CornerOf(spotR)) spotR.End = !spotR.End;   // nunca las dos en la misma
             strips[0] = spotL.Edge;
             strips[1] = spotR.Edge;
@@ -427,14 +491,14 @@ namespace NeuTaskBar
 
         int AnchorOf(Edge e) { return e == Edge.Top || e == Edge.Left ? Cross(e) + layH : Cross(e) - layH; }
 
-        // Rectángulo que ocuparía en una esquina una isla de esa longitud.
+        // Rectángulo que ocuparía en una esquina (o en el centro de su borde) una isla de esa longitud.
         RECT CornerRect(int corner, int len)
         {
             Spot s = SpotAt(corner);
             RECT rc = monRect;
             bool vert = IsVert(s.Edge);
             int a0 = vert ? rc.Top : rc.Left, a1 = vert ? rc.Bottom : rc.Right;
-            int along = s.End ? a1 - layMargin - len : a0 + layMargin;
+            int along = s.Centered ? (a0 + a1 - len) / 2 : s.End ? a1 - layMargin - len : a0 + layMargin;
             int c0 = Math.Min(Cross(s.Edge), AnchorOf(s.Edge));
             return vert ? new RECT(c0, along, c0 + layH, along + len) : new RECT(along, c0, along + len, c0 + layH);
         }
@@ -458,11 +522,11 @@ namespace NeuTaskBar
             int hot = NearestTarget(x, y);
             if (hot == targetHot) return;
             targetHot = hot;
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < targets.Length; i++)
                 if (targetFree[i]) Native.SetLayeredWindowAttributes(targets[i], 0, (byte)(i == hot ? 150 : 60), 2 /* LWA_ALPHA */);
         }
 
-        // Al soltar la isla se queda en la esquina libre más cercana, y se guarda.
+        // Al soltar la isla se queda en el sitio libre más cercano, y se guarda.
         void MoveEnd(Island isl, int x, int y)
         {
             int corner = NearestTarget(x, y);
@@ -490,7 +554,7 @@ namespace NeuTaskBar
         {
             int best = -1;
             long bestD = long.MaxValue;
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < targets.Length; i++)
             {
                 if (!targetFree[i]) continue;
                 RECT r = targetRects[i];
@@ -504,7 +568,8 @@ namespace NeuTaskBar
         static readonly WndProcDelegate TargetProc = (h, m, w, l) => Native.DefWindowProcW(h, m, w, l);
 
         // Marcas translúcidas en las esquinas donde puede soltarse la isla que se arrastra (null = quitarlas): todas
-        // menos la que ocupa la otra isla; unidas se mueven juntas y vale cualquiera.
+        // menos la que ocupa la otra isla; unidas se mueven juntas y vale cualquiera. La isla de aplicaciones, si se
+        // mueve sola y va tumbada, tiene además el centro de arriba y el de abajo.
         void ShowTargets(Island isl)
         {
             targetHot = -1;
@@ -517,7 +582,7 @@ namespace NeuTaskBar
                 wc.lpszClassName = TargetClass;
                 Native.RegisterClassW(ref wc);
                 int ex = Native.WS_EX_TOPMOST | Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE | Native.WS_EX_LAYERED | Native.WS_EX_TRANSPARENT;
-                for (int i = 0; i < 4; i++)
+                for (int i = 0; i < targets.Length; i++)
                 {
                     targets[i] = Native.CreateWindowExW(ex, TargetClass, "", Native.WS_POPUP, 0, 0, 10, 10, IntPtr.Zero, IntPtr.Zero, wc.hInstance, IntPtr.Zero);
                     if (!Island.IsWin11) continue;
@@ -529,9 +594,10 @@ namespace NeuTaskBar
             Spot other = isl == left ? spotR : spotL;
             int taken = isl == null || joined || (isl == right && spotL.Centered) ? -1 : CornerOf(other);
             int len = joined ? left.VisW + right.VisW : isl == null ? 0 : isl.VisW;
-            for (int i = 0; i < 4; i++)
+            bool center = isl == left && !joined && !IsVert(barEdge);
+            for (int i = 0; i < targets.Length; i++)
             {
-                targetFree[i] = isl != null && i != taken;
+                targetFree[i] = isl != null && i != taken && (i < Config.CornerCount || center);
                 if (!targetFree[i]) { Native.ShowWindow(targets[i], Native.SW_HIDE); continue; }
                 RECT r = targetRects[i] = CornerRect(i, len);
                 Native.SetLayeredWindowAttributes(targets[i], 0, 60, 2 /* LWA_ALPHA */);
@@ -542,14 +608,23 @@ namespace NeuTaskBar
 
         // Islas unidas: la de información va pegada a continuación de la de aplicaciones (o esta termina donde empieza
         // aquella, si la barra va al final del borde), y la placa abarca las dos. Se repasa cada vez que una cambia de
-        // sitio o de tamaño.
+        // sitio o de tamaño. En la barra completa cada isla se queda en su extremo y la placa va de lado a lado.
         void JoinFollow()
         {
-            if (!joined || following || plate == null) return;
+            if (!OnePiece || following || plate == null) return;
             following = true;
             Edge e = spotL.Edge;
             bool vert = IsVert(e);
             int cross = Cross(e);
+            if (full)
+            {
+                int a0 = vert ? monRect.Top : monRect.Left, a1 = vert ? monRect.Bottom : monRect.Right;
+                plate.VisW = Math.Max(1, a1 - a0 - layMargin * 2);
+                plate.VisH = left.VisH;
+                plate.SetPlacement(e, cross, a0 + layMargin);
+                following = false;
+                return;
+            }
             if (spotL.End)
             {
                 RECT r = right.RestRect;
@@ -575,6 +650,7 @@ namespace NeuTaskBar
             Native.SetTimer(host, new UIntPtr(T_TOOLS), 700, IntPtr.Zero);
 
             volume.Attach();
+            ApplyStats();
             right.UpdateNetwork(NetworkProbe.Detect());
             right.UpdateBattery(BatteryState.Read());
             right.UpdateClock();
@@ -612,6 +688,7 @@ namespace NeuTaskBar
             Native.KillTimer(host, new UIntPtr(T_REFRESH));
             Native.KillTimer(host, new UIntPtr(T_SETUP));
             Native.KillTimer(host, new UIntPtr(T_NET));
+            Native.KillTimer(host, new UIntPtr(T_STATS));
             RemoveHooks();
             flyout.HideNow();
             menu.Close();
@@ -703,6 +780,7 @@ namespace NeuTaskBar
                 case WM_APP_VOLUME:
                     volume.Query();
                     right.Refresh();
+                    if (!paused) right.NotifyVolume();
                     return IntPtr.Zero;
                 case WM_APP_NET:
                     Native.SetTimer(host, new UIntPtr(T_NET), 700, IntPtr.Zero);
@@ -716,6 +794,7 @@ namespace NeuTaskBar
                         right.UpdateBattery(BatteryState.Read());
                         right.UpdateClock();
                     }
+                    ApplyMotion();   // enchufar o desenchufar el cargador puede cambiar si hay animaciones
                     return new IntPtr(1);
                 case Native.WM_TIMECHANGE:
                     if (!paused) right.UpdateClock();
@@ -739,6 +818,7 @@ namespace NeuTaskBar
                 case T_TOOLS:
                     if (paused) { Native.KillTimer(host, new UIntPtr(T_TOOLS)); break; }
                     if (Config.ReadWindowsTaskbarSettings()) ApplyWindowsSettings();
+                    if (Config.ReadWindowsTheme()) ApplyTints();   // modo claro u oscuro, o color de énfasis, de Windows
                     CheckTaskbarEdge();
                     FitWorkArea();
                     UpdateFill();
@@ -756,6 +836,11 @@ namespace NeuTaskBar
                     break;
                 case T_HIDE:
                     AutoHideTick();
+                    break;
+                case T_STATS:
+                    if (paused) { Native.KillTimer(host, new UIntPtr(T_STATS)); break; }
+                    stats.Sample();
+                    right.UpdateStats(stats.Cpu, stats.Ram);
                     break;
                 case T_CLOCK:
                     if (paused) { Native.KillTimer(host, new UIntPtr(T_CLOCK)); break; }
@@ -998,7 +1083,7 @@ namespace NeuTaskBar
             monRect = rc;
             layH = h;
             layMargin = margin;
-            bool wasJoined = joined;
+            bool wasPiece = OnePiece;
             ResolveSpots();
             Edge el = spotL.Edge, er = spotR.Edge;
             bool vert = IsVert(barEdge);
@@ -1013,7 +1098,7 @@ namespace NeuTaskBar
             // Cada isla va al inicio (izquierda/arriba) o al final (derecha/abajo) de su borde; la de aplicaciones
             // puede ir además centrada, sin pisar a la otra si comparten borde.
             int a0 = vert ? rc.Top : rc.Left, a1 = vert ? rc.Bottom : rc.Right;
-            if (joined != wasJoined) ApplyTints();
+            if (OnePiece != wasPiece) ApplyTints();
             following = true;   // el seguimiento de las islas unidas se hace una vez, al final
             if (joined)
             {
@@ -1046,7 +1131,7 @@ namespace NeuTaskBar
             }
             following = false;
             JoinFollow();
-            if (joined != wasJoined && started && !paused) ShowIslands(!islandsHiddenForFullscreen);
+            if (OnePiece != wasPiece && started && !paused) ShowIslands(!islandsHiddenForFullscreen);
 
             hideDist = h + margin + left.S(14);
             int reserved = barThick = h + margin;
@@ -1084,7 +1169,8 @@ namespace NeuTaskBar
         void UpdateFill()
         {
             if (fills[0] == null || left == null) return;
-            bool on = !paused && started && barReserved && lastBarHeight >= 0 && !islandsHiddenForFullscreen;
+            // (La barra completa sin separación con los bordes tapa toda la franja: no queda hueco que rellenar.)
+            bool on = !paused && started && barReserved && lastBarHeight >= 0 && !islandsHiddenForFullscreen && !(full && layMargin == 0);
             IntPtr src = on ? StripFill.TopMaximized(Native.MonitorFromPoint(new POINT(0, 0), 1 /* MONITOR_DEFAULTTOPRIMARY */)) : IntPtr.Zero;
             bool any = false;
             for (int i = 0; i < fills.Length; i++)
@@ -1192,6 +1278,9 @@ namespace NeuTaskBar
 
             string sig;
             var list = tracker.Snapshot(out sig);
+            // Apps que se ha pedido no ver en la barra (las ancladas no se esconden: para eso se desanclan).
+            if (Config.HiddenApps.Length > 0) list.RemoveAll(it => !it.Pinned && Config.IsHiddenApp(Config.AppId(it.Aumid, it.ExePath)));
+            list = GroupItems(list);
             list = Uncombine(list, ref sig);
             flyout.UpdateItems(list);
             if (sig == lastSig) return;
@@ -1208,6 +1297,45 @@ namespace NeuTaskBar
             }
         }
 
+        // Las apps ancladas que forman un grupo pasan a ocupar un solo botón, en el sitio de la primera de ellas. El
+        // botón reúne sus ventanas: cuenta como abierto o activo si lo está alguna de sus apps.
+        List<AppItem> GroupItems(List<AppItem> list)
+        {
+            if (pins.Groups.Count == 0) return list;
+            var result = new List<AppItem>();
+            var made = new Dictionary<List<string>, AppItem>();
+            foreach (var it in list)
+            {
+                var g = it.Pinned ? pins.GroupOf(it.LaunchPath) : null;
+                if (g == null) { result.Add(it); continue; }
+                AppItem group;
+                if (!made.TryGetValue(g, out group))
+                {
+                    group = new AppItem { Key = "group:" + g[0], Id = "group:" + g[0], Pinned = true, Members = new List<AppItem>(), Group = g };
+                    made[g] = group;
+                    result.Add(group);
+                }
+                group.Members.Add(it);
+            }
+            foreach (var group in made.Values)
+            {
+                var order = group.Group;
+                Func<AppItem, int> at = m => order.FindIndex(p => string.Equals(p, m.LaunchPath, StringComparison.OrdinalIgnoreCase));
+                group.Members.Sort((a, b) => at(a).CompareTo(at(b)));   // en el orden en que se añadieron
+                var names = new List<string>();
+                foreach (var m in group.Members)
+                {
+                    names.Add(m.Name ?? "");
+                    group.Windows.AddRange(m.Windows);
+                    group.Active |= m.Active;
+                    group.Flashing |= m.Flashing;
+                }
+                group.Name = string.Join(", ", names.ToArray());
+                if (group.Active) group.Flashing = false;
+            }
+            return result;
+        }
+
         // "Combinar botones y ocultar etiquetas": nunca (2) o solo con la barra llena (1). Cada ventana pasa a tener
         // su propio botón con el título como etiqueta; las apps fijadas sin abrir siguen siendo un icono.
         List<AppItem> Uncombine(List<AppItem> list, ref string sig)
@@ -1220,7 +1348,8 @@ namespace NeuTaskBar
             int labeled = 0, plain = 0;
             foreach (var it in list)
             {
-                if (it.Windows.Count == 0) { result.Add(it); plain++; continue; }
+                // Un grupo sigue siendo un solo botón, tenga las ventanas que tenga.
+                if (it.Windows.Count == 0 || it.Members != null) { result.Add(it); plain++; continue; }
                 var wins = new List<IntPtr>(it.Windows);
                 wins.Sort((a, b) => a.ToInt64().CompareTo(b.ToInt64()));   // orden estable (el de la lista cambia con el foco)
                 for (int i = 0; i < wins.Count; i++)
@@ -1292,6 +1421,44 @@ namespace NeuTaskBar
             Activate(cur < 0 ? wins[0] : stable[(cur + 1) % stable.Count]);
         }
 
+        // Clic central en una app: abre otra ventana suya o, si así se ha elegido, cierra la que tiene más a mano.
+        void ItemMiddle(AppItem it)
+        {
+            if (Config.MiddleClick == 1)
+            {
+                if (it.Running) Native.PostMessageW(it.Windows[0], Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                return;
+            }
+            if (!string.IsNullOrEmpty(it.LaunchPath)) Native.Launch(it.LaunchPath, null);
+        }
+
+        // Rueda sobre una app abierta: pasa a su ventana siguiente o a la anterior (si se ha elegido en Comportamiento).
+        void ItemWheel(AppItem it, bool up)
+        {
+            if (Config.WheelAction != 1 || !it.Running) return;
+            flyout.HideNow();
+            IntPtr fg = Native.GetForegroundWindow();
+            IntPtr fgRoot = fg == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(fg, Native.GA_ROOTOWNER);
+            var stable = new List<IntPtr>(it.Windows);
+            stable.Sort((a, b) => a.ToInt64().CompareTo(b.ToInt64()));
+            int n = stable.Count, cur = stable.FindIndex(w => w == fg || w == fgRoot);
+            if (cur >= 0 && n == 1) return;   // su única ventana ya está delante
+            Activate(cur < 0 ? it.Windows[0] : stable[(cur + (up ? n - 1 : 1)) % n]);
+        }
+
+        // Deja de mostrar una app en la barra (se recupera desde la página Aplicaciones).
+        void HideApp(AppItem it)
+        {
+            string id = Config.AppId(it.Aumid, it.ExePath);
+            if (id.Length == 0 || Config.IsHiddenApp(id)) return;
+            var list = new List<string>(Config.HiddenApps);
+            list.Add(id);
+            Config.HiddenApps = list.ToArray();
+            Config.Save("hideapps", string.Join(";", Config.HiddenApps));
+            lastSig = "";
+            RefreshApps();
+        }
+
         static void Activate(IntPtr hwnd)
         {
             if (Native.IsIconic(hwnd)) Native.ShowWindow(hwnd, Native.SW_RESTORE);
@@ -1314,7 +1481,9 @@ namespace NeuTaskBar
             var runKeys = new List<string>();
             foreach (var it in ordered)
             {
-                if (it.Pinned) { if (!pinnedPaths.Contains(it.LaunchPath)) pinnedPaths.Add(it.LaunchPath); }
+                // Un grupo se mueve entero: sus apps quedan seguidas en el sitio del grupo.
+                if (it.Members != null) { foreach (var m in it.Members) if (!pinnedPaths.Contains(m.LaunchPath)) pinnedPaths.Add(m.LaunchPath); }
+                else if (it.Pinned) { if (!pinnedPaths.Contains(it.LaunchPath)) pinnedPaths.Add(it.LaunchPath); }
                 else if (!runKeys.Contains(it.Key)) runKeys.Add(it.Key);
             }
             pins.ReorderByPaths(pinnedPaths);
@@ -1330,9 +1499,9 @@ namespace NeuTaskBar
             {
                 string ext = System.IO.Path.GetExtension(f).ToLowerInvariant();
                 if (ext != ".lnk" && ext != ".exe") continue;
-                string target, name, aumid;
-                Shortcut.Resolve(f, out target, out name, out aumid);
-                if (pins.Contains((target ?? "").ToLowerInvariant(), (aumid ?? "").ToLowerInvariant())) continue;
+                string target, name, aumid, args;
+                Shortcut.Resolve(f, out target, out name, out aumid, out args);
+                if (pins.Contains((target ?? "").ToLowerInvariant(), (aumid ?? "").ToLowerInvariant(), Shortcut.AppIdentity(target, args))) continue;
                 pins.Add(f, null);
                 changed = true;
             }
@@ -1348,6 +1517,7 @@ namespace NeuTaskBar
             // El menú sale hacia el centro de la pantalla desde la isla en la que se ha pedido.
             Edge e = right.RestRect.Contains(x, y) ? right.Edge : left.Edge;
             menu.Edge = e;
+            openGroup = null;
             menu.Show(defs, x, y, AnchorOf(e));
         }
 
@@ -1367,9 +1537,64 @@ namespace NeuTaskBar
             OpenMenu(l, x, y);
         }
 
+        static string Short(string text) { return text.Length > 34 ? text.Substring(0, 33) + "…" : text; }
+
+        // Lleva una app al grupo en el que está otra (member = null: empieza uno nuevo con ella). Un grupo solo lleva
+        // apps ancladas, así que si no lo estaba se ancla ahora.
+        void Regroup(AppItem it, string member)
+        {
+            string path = it.LaunchPath;
+            if (!it.Pinned)
+            {
+                path = it.Packaged ? it.LaunchPath : it.ExePath;
+                if (string.IsNullOrEmpty(path)) return;
+                pins.Add(path, it.Packaged ? it.Name : null);
+            }
+            if (member == null) pins.CreateGroup(path); else pins.AddToGroup(member, path);
+            lastSig = "";
+            RefreshApps();
+        }
+
+        // Clic en un grupo: sus apps, para abrir o traer al frente la que se elija. Otro clic en el grupo lo cierra.
+        void GroupOpen(AppItem group, int x, int y)
+        {
+            flyout.HideNow();
+            if (pressedGroup == group.Id) { pressedGroup = null; return; }
+            var l = new List<MenuDef>();
+            foreach (var m in group.Members)
+            {
+                var member = m;
+                string name = string.IsNullOrEmpty(m.Name) ? L.T("Aplicación") : m.Name;
+                l.Add(MenuDef.Item(name, () => ItemClick(member), member.Image));
+            }
+            OpenMenu(l, x, y);
+            openGroup = group.Id;
+        }
+
+        // Clic derecho en un grupo: sacar una de sus apps (vuelve a tener su botón), deshacerlo o cerrar sus ventanas.
+        void GroupContext(AppItem group, int x, int y)
+        {
+            var l = new List<MenuDef>();
+            l.Add(MenuDef.Header(L.T("Grupo")));
+            foreach (var m in group.Members)
+            {
+                var member = m;
+                l.Add(MenuDef.Item(L.T("Sacar del grupo: ") + Short(m.Name ?? ""), () => { pins.RemoveFromGroup(member.LaunchPath); lastSig = ""; RefreshApps(); }, member.Image));
+            }
+            l.Add(MenuDef.Separator());
+            l.Add(MenuDef.Item(L.T("Deshacer el grupo"), () => { pins.DissolveGroup(group.Members[0].LaunchPath); lastSig = ""; RefreshApps(); }, ""));
+            if (group.Running)
+                l.Add(MenuDef.Item(L.T("Cerrar todas las ventanas"), () =>
+                {
+                    foreach (var w in group.Windows.ToArray()) Native.PostMessageW(w, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                }, ""));
+            OpenMenu(l, x, y);
+        }
+
         // Botón de una app: lista de salto de Windows (tareas y categorías), nombre de la app, anclar/desanclar y cerrar.
         void ItemContext(AppItem it, int x, int y)
         {
+            if (it.Members != null) { GroupContext(it, x, y); return; }
             var l = new List<MenuDef>();
             int iconPx = left.S(16) * 2;
             foreach (var cat in JumpLists.For(it.ExePath))
@@ -1401,6 +1626,19 @@ namespace NeuTaskBar
                     else pins.Add(it.ExePath, null);
                     lastSig = ""; RefreshApps();
                 }, "\uE718"));
+            // Grupos: la app pasa a compartir botón con otras (hasta PinStore.MaxGroupSize por grupo).
+            if (it.Pinned || it.Packaged || !string.IsNullOrEmpty(it.ExePath))
+            {
+                l.Add(MenuDef.Item(L.T("Crear grupo"), () => Regroup(it, null), ""));
+                foreach (var g in pins.Groups)
+                {
+                    if (g.Count >= PinStore.MaxGroupSize) continue;
+                    string member = g[0];
+                    l.Add(MenuDef.Item(L.T("Añadir al grupo: ") + Short(pins.GroupName(g)), () => Regroup(it, member), ""));
+                }
+            }
+            if (it.Running && !it.Pinned && Config.AppId(it.Aumid, it.ExePath).Length > 0)
+                l.Add(MenuDef.Item(L.T("Ocultar de la barra de tareas"), () => HideApp(it), ""));
             if (it.Running && Config.EndTask)
                 l.Add(MenuDef.Item(L.T("Finalizar tarea"), () =>
                 {
