@@ -25,6 +25,7 @@ Los cambios que nota quien usa NeuTaskBar, por versión. El formato sigue [Keep 
 
 ### Cambiado
 
+- Página **Inicio** más sencilla: el estado de la barra y su botón en una sola tarjeta, sin el logo grande ni el texto de bienvenida en dos líneas.
 - Las islas se pintan con transparencia real, así que los iconos ya no se aclaran sobre fondos claros.
 - La barra original de Windows se deja invisible en lugar de forzarle la ocultación automática.
 - Los ejecutables y los recursos generados dejan de guardarse en el repositorio.

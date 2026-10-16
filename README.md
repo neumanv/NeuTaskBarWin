@@ -9,8 +9,6 @@
 ![Idiomas](https://img.shields.io/badge/idiomas-ES%20%7C%20EN%20%7C%20FR-2ea44f)
 ![Licencia CC0](https://img.shields.io/badge/licencia-CC0%201.0-lightgrey)
 
-<img src="docs/ventana.png" alt="Ventana de NeuTaskBar" width="620">
-
 </div>
 
 ```text
@@ -60,10 +58,6 @@ Compila, añade la aplicación al menú Inicio y a Configuración ▸ Aplicacion
 ## 🎛️ Personalizar
 
 Todo se cambia desde la ventana de la aplicación y se aplica al momento, sin reiniciar la barra.
-
-<div align="center">
-<img src="docs/apariencia.png" alt="Página Apariencia" width="620">
-</div>
 
 | Página | Qué puedes hacer |
 | --- | --- |
@@ -140,7 +134,6 @@ C# sobre .NET Framework 4.x y Win32 puro, sin dependencias: se compila con el `c
 | `src/ShellTaskbar.cs`, `StripFill.cs` | Barra original de Windows y franja reservada |
 | `src/Gfx.cs`, `GfxText.cs`, `Gdi.cs`, `Native.cs` | Dibujo y llamadas a Windows |
 | `uninstall/` | Desinstalador |
-| `docs/` | Capturas de este documento |
 
 El motor (`--engine`) y la ventana son procesos distintos: la ventana guarda en `config.ini` y avisa al motor, que lo aplica sin reiniciar. Un tercer proceso (`--guard`) repone la barra de Windows si el motor muere.
 

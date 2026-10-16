@@ -81,10 +81,8 @@ namespace NeuTaskBar
 
             // ---- Inicio
             "Bienvenido a NeuTaskBar", "Welcome to NeuTaskBar", "Bienvenue dans NeuTaskBar",
-            "Personaliza tu barra de tareas de Windows con un diseño de dos islas:", "Customize your Windows taskbar with a two-island design:",
-                "Personnalisez votre barre des tâches Windows avec deux îles :",
-            "tus aplicaciones a la izquierda y el sistema a la derecha.", "your apps on the left and the system on the right.",
-                "vos applications à gauche et le système à droite.",
+            "Tus aplicaciones a un lado y el sistema al otro.", "Your apps on one side, the system on the other.",
+                "Vos applications d'un côté, le système de l'autre.",
             "Activar barra de tareas", "Turn on taskbar", "Activer la barre des tâches",
             "Desactivar barra de tareas", "Turn off taskbar", "Désactiver la barre des tâches",
             "Iniciar con Windows", "Start with Windows", "Lancer au démarrage de Windows",

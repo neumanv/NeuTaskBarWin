@@ -152,8 +152,8 @@ namespace NeuTaskBar
             if (resetButton != null) resetButton.Location = new Point(ContentLeft + ContentWidth - resetButton.Width, Ui.S(32) + scroll);
             foreach (var c in cards)
             {
-                var hero = c as HeroCard;
-                int h = hero != null ? hero.PreferredHeight : ((Card)c).PreferredHeight;
+                var status = c as StatusCard;
+                int h = status != null ? status.PreferredHeight : ((Card)c).PreferredHeight;
                 c.SetBounds(ContentLeft, y + scroll, ContentWidth, h);
                 y += h + Ui.S(16);
             }
@@ -239,29 +239,29 @@ namespace NeuTaskBar
         public static string Px(int v) { return v + " px"; }
     }
 
-    // Tarjeta de bienvenida con el botón principal.
-    sealed class HeroCard : Control
+    // Tarjeta de estado de la barra con el botón para activarla o desactivarla.
+    sealed class StatusCard : Control
     {
         public readonly PillButton Button = new PillButton();
-        public Image Logo;
         public string Status = "";
         public Color StatusColor = Ui.Faint;
 
-        public HeroCard()
+        public StatusCard()
         {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
             BackColor = Ui.Bg;
             Button.BackColor = Ui.CardFill;
+            Button.FontPx = 15;
             Controls.Add(Button);
         }
 
-        public int PreferredHeight { get { return Ui.S(372); } }
+        public int PreferredHeight { get { return Ui.S(88); } }
 
         protected override void OnLayout(LayoutEventArgs e)
         {
             base.OnLayout(e);
-            int bw = Ui.S(320), bh = Ui.S(54);
-            Button.SetBounds((Width - bw) / 2, Ui.S(290), bw, bh);
+            int bw = Ui.S(230), bh = Ui.S(44);
+            Button.SetBounds(Width - Ui.S(22) - bw, (Height - bh) / 2, bw, bh);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -269,39 +269,20 @@ namespace NeuTaskBar
             var g = e.Graphics;
             g.Clear(BackColor);
             Ui.Smooth(g);
-            Ui.FillRound(g, new RectangleF(0.5f, 0.5f, Width - 2f, Height - 2f), Ui.S(12), Ui.CardFill, Ui.Border);
-            int W = Width;
-
-            if (Logo != null)
-            {
-                float lh = Ui.S(100), lw = lh * Logo.Width / Logo.Height;
-                g.DrawImage(Logo, (W - lw) / 2f, Ui.S(30), lw, lh);
-            }
-            using (var f = Ui.Font(30, true))
-                Ui.Text(g, L.T("Bienvenido a NeuTaskBar"), f, Ui.Ink, new Rectangle(0, Ui.S(146), W, Ui.S(40)),
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-            using (var f = Ui.Font(15, false))
-            {
-                Ui.Text(g, L.T("Personaliza tu barra de tareas de Windows con un diseño de dos islas:"), f, Ui.Muted,
-                    new Rectangle(0, Ui.S(192), W, Ui.S(24)), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-                Ui.Text(g, L.T("tus aplicaciones a la izquierda y el sistema a la derecha."), f, Ui.Muted,
-                    new Rectangle(0, Ui.S(216), W, Ui.S(24)), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-            }
-            using (var f = Ui.Font(14, false))
-            {
-                var size = TextRenderer.MeasureText(g, Status, f, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding);
-                float d = Ui.S(10), total = d + Ui.S(10) + size.Width;
-                float x0 = (W - total) / 2f, y = Ui.S(254);
-                using (var b = new SolidBrush(StatusColor)) g.FillEllipse(b, x0, y + (size.Height - d) / 2f, d, d);
-                Ui.Text(g, Status, f, Ui.Ink, new Rectangle((int)(x0 + d + Ui.S(10)), (int)y, size.Width + 4, size.Height + 2), TextFormatFlags.Left);
-            }
+            Ui.FillRound(g, new RectangleF(0.5f, 0.5f, Width - 2f, Height - 2f), Ui.S(10), Ui.CardFill, Ui.Border);
+            float d = Ui.S(10);
+            using (var b = new SolidBrush(StatusColor)) g.FillEllipse(b, Ui.S(24), (Height - d) / 2f, d, d);
+            int left = Ui.S(24) + (int)d + Ui.S(12);
+            using (var f = Ui.Font(15, true))
+                Ui.Text(g, Status, f, Ui.Ink, new Rectangle(left, 0, Button.Left - Ui.S(16) - left, Height),
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
     }
 
-    // Inicio: bienvenida, activar/desactivar la barra y ajustes rápidos.
+    // Inicio: estado de la barra (activar/desactivar) y ajustes rápidos.
     sealed class HomePage : Page
     {
-        readonly HeroCard hero = new HeroCard();
+        readonly StatusCard hero = new StatusCard();
         readonly Card quick = new Card();
         readonly ToggleSwitch autostart = new ToggleSwitch();
         EngineState state = EngineState.Off;
@@ -310,9 +291,8 @@ namespace NeuTaskBar
         public event Action ToggleRequested;
         public event Action LanguageChanged;   // hay que rehacer las páginas: cada una fija sus textos al construirse
 
-        public HomePage(Image logo) : base("", "")
+        public HomePage() : base(L.T("Bienvenido a NeuTaskBar"), L.T("Tus aplicaciones a un lado y el sistema al otro."))
         {
-            hero.Logo = logo;
             hero.Button.Click += (o, e) => { if (ToggleRequested != null) ToggleRequested(); };
             Controls.Add(hero);
 
@@ -898,7 +878,7 @@ namespace NeuTaskBar
             pages.Clear();
             nav.Titles.Clear();
             nav.Glyphs.Clear();
-            home = new HomePage(logo);
+            home = new HomePage();
             home.ToggleRequested += OnToggle;
             AddPage(L.T("Inicio|home"), "", home);
             AddPage(L.T("Apariencia"), "", new AppearancePage());
