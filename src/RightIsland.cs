@@ -21,6 +21,7 @@ namespace NeuTaskBar
         public Action<int> OnVolumeWheel;
         public Func<VolumeMonitor> Volume;
         public int LastSysSlot;   // icono de sistema bajo el cursor en el último clic derecho: 0 red, 1 volumen, 2 batería
+        public bool Secondary;
 
         NetKind net = NetKind.None;
         BatteryState battery;
@@ -222,9 +223,9 @@ namespace NeuTaskBar
             sysKinds.Clear();
             sysLens.Clear();
             percentPx = vert ? Math.Min(S(10), clockPx) : Math.Max(S(9), S(Config.TextSize) - S(1));
-            if (Config.ShowNet) { sysKinds.Add(KindNet); sysLens.Add(slot); }
-            if (Config.ShowVolume) { sysKinds.Add(KindVolume); sysLens.Add(slot); }
-            if (Config.ShowBattery && battery.Present)
+            if (!Secondary && Config.ShowNet) { sysKinds.Add(KindNet); sysLens.Add(slot); }
+            if (!Secondary && Config.ShowVolume) { sysKinds.Add(KindVolume); sysLens.Add(slot); }
+            if (!Secondary && Config.ShowBattery && battery.Present)
             {
                 int extra = 0;
                 if (Config.BatteryPercent)
@@ -239,7 +240,7 @@ namespace NeuTaskBar
             foreach (int len in sysLens) sysW += len;
 
             // Uso del equipo: una línea por dato si caben dos, o los dos seguidos (en vertical, rótulo y valor apilados).
-            int nStats = (Config.ShowCpu ? 1 : 0) + (Config.ShowRam ? 1 : 0);
+            int nStats = Secondary ? 0 : (Config.ShowCpu ? 1 : 0) + (Config.ShowRam ? 1 : 0);
             statsPx = vert ? Math.Min(S(10), clockPx) : Math.Max(S(9), S(Config.TextSize) - S(1));
             var statsFont = Gdi.Font("Segoe UI", statsPx, 400);
             int statsLineH = Gdi.LineHeight(sdc, statsFont);
@@ -260,9 +261,9 @@ namespace NeuTaskBar
                 rects[idx] = vert ? new RECT(y, cur, y + cellH, cur + len) : new RECT(cur, y, cur + len, y + cellH);
                 cur += len;
             };
-            if (Config.ShowChevron) add(Chevron, chevW);
-            if (Config.TouchKeyboard) add(Keyboard, S(30));
-            if (Config.ShowMedia) add(Media, slot * 3 + S(6));
+            if (!Secondary && Config.ShowChevron) add(Chevron, chevW);
+            if (!Secondary && Config.TouchKeyboard) add(Keyboard, S(30));
+            if (!Secondary && Config.ShowMedia) add(Media, slot * 3 + S(6));
             if (nStats > 0) add(Stats, statsLen);
             if (sysKinds.Count > 0) add(Sys, sysW);
             if (Config.ShowClock)

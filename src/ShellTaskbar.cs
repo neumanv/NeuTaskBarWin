@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace NeuTaskBar
@@ -9,6 +10,30 @@ namespace NeuTaskBar
         static string StatePath { get { return Path.Combine(Config.DataDir, "state.txt"); } }
 
         public static IntPtr FindTray() { return Native.FindWindowW("Shell_TrayWnd", null); }
+
+        // Todas las barras de Windows: la principal y una por cada monitor secundario.
+        public static List<IntPtr> FindTrays()
+        {
+            var list = new List<IntPtr>();
+            Native.EnumWindows((h, l) =>
+            {
+                string c = Native.GetClassName(h);
+                if (c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd") list.Add(h);
+                return true;
+            }, IntPtr.Zero);
+            return list;
+        }
+
+        // Barra de Windows del monitor indicado; si ese monitor no tiene (solo la principal tiene iconos de bandeja),
+        // vale la principal.
+        public static IntPtr FindTrayForMonitor(IntPtr monitor)
+        {
+            IntPtr primary = FindTray();
+            if (monitor == IntPtr.Zero) return primary;
+            foreach (var t in FindTrays())
+                if (Native.MonitorFromWindow(t, 2 /* NEAREST */) == monitor) return t;
+            return primary;
+        }
 
         static APPBARDATA NewData(IntPtr hwnd)
         {
@@ -61,6 +86,7 @@ namespace NeuTaskBar
 
         static void SetGhost(IntPtr tray, bool on)
         {
+            if (tray == IntPtr.Zero) return;
             long ex = Native.GetWindowLongPtr(tray, Native.GWL_EXSTYLE).ToInt64();
             if (on)
             {
@@ -73,6 +99,15 @@ namespace NeuTaskBar
                 Native.SetWindowLongPtr(tray, Native.GWL_EXSTYLE, new IntPtr(ex & ~(long)GhostStyle));
                 Native.RedrawWindow(tray, IntPtr.Zero, IntPtr.Zero, 0x1 | 0x4 | 0x80 | 0x100 | 0x400 /* invalidar todo, con hijas */);
             }
+        }
+
+        // Para abrir el panel de iconos ocultos hay que enseñar un momento la barra original (UI Automation no la
+        // activa si está transparente). Después se vuelve a ocultar.
+        public static void SetTrayGhost(IntPtr tray, bool on) { SetGhost(tray, on); }
+
+        static void HideAllWindows()
+        {
+            foreach (var t in FindTrays()) SetGhost(t, true);
         }
 
         // Devuelve false si el explorador aún no tiene barra (p. ej. al iniciar sesión).
@@ -98,7 +133,7 @@ namespace NeuTaskBar
             // pero con una barra así las apps de tipo Chrome (VS Code, Brave...) dejan 2 px libres en los bordes de la
             // pantalla al maximizarse, y se veía una línea a los lados. La franja es la misma que reservan las islas.
             ClearStaleAutoHide(tray);
-            SetGhost(tray, true);
+            HideAllWindows();
             return true;
         }
 
@@ -113,15 +148,15 @@ namespace NeuTaskBar
         // Solo esconde la ventana de la barra original, sin tocar su modo de ocultación.
         public static void HideWindow()
         {
-            IntPtr tray = FindTray();
-            if (tray != IntPtr.Zero) SetGhost(tray, true);
+            HideAllWindows();
         }
 
         // ¿Se ve la barra original? (Windows la repone a veces por su cuenta, o estrena ventana.)
         public static bool IsTrayVisible()
         {
-            IntPtr tray = FindTray();
-            return tray != IntPtr.Zero && !(IsGhost(tray) && Native.IsWindowVisible(tray));
+            foreach (var tray in FindTrays())
+                if (!IsGhost(tray) && Native.IsWindowVisible(tray)) return true;
+            return false;
         }
 
         public static void Restore()
@@ -139,9 +174,9 @@ namespace NeuTaskBar
             }
             catch { }
 
+            foreach (var t in FindTrays()) SetGhost(t, false);
             if (tray != IntPtr.Zero)
             {
-                SetGhost(tray, false);
                 if (hadState) SetState(tray, original);
                 if ((original & Native.ABS_AUTOHIDE) == 0) Native.ShowWindow(tray, Native.SW_SHOWNA);
             }
@@ -331,9 +366,9 @@ namespace NeuTaskBar
             fitted = unfitted = new RECT();
         }
 
-        public static void UnregisterBar(IntPtr hwnd)
+        public static void UnregisterBar(IntPtr hwnd, bool unfit = true)
         {
-            UnfitWorkArea();
+            if (unfit) UnfitWorkArea();
             if (!bars.Remove(hwnd)) return;
             var d = NewData(hwnd);
             Native.SHAppBarMessage(Native.ABM_REMOVE, ref d);

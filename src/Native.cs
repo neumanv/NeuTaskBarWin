@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -6,6 +7,7 @@ namespace NeuTaskBar
 {
     delegate IntPtr WndProcDelegate(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
     delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+    delegate bool MonitorEnumProc(IntPtr monitor, IntPtr hdc, IntPtr rect, IntPtr lParam);
     delegate void WinEventProc(IntPtr hook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -266,6 +268,7 @@ namespace NeuTaskBar
         [DllImport("user32.dll")] public static extern bool RegisterShellHookWindow(IntPtr h);
         [DllImport("user32.dll")] public static extern bool DeregisterShellHookWindow(IntPtr h);
         [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc proc, IntPtr lParam);
+        [DllImport("user32.dll")] public static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorEnumProc proc, IntPtr lParam);
         [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
         [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
         [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
@@ -393,6 +396,42 @@ namespace NeuTaskBar
 
         // Marca de la ventana principal de la aplicacion (la ventana no se identifica por el titulo).
         public const string MainWindowProp = "NeuTaskBar.MainWindow";
+
+        // FindWindow falla a veces con ventanas XAML del shell; enumerarlas siempre las encuentra.
+        public static IntPtr FindWindowByClass(string cls)
+        {
+            IntPtr found = IntPtr.Zero;
+            EnumWindows((h, l) =>
+            {
+                if (GetClassName(h) == cls) { found = h; return false; }
+                return true;
+            }, IntPtr.Zero);
+            return found;
+        }
+
+        public static List<IntPtr> Monitors()
+        {
+            var list = new List<IntPtr>();
+            EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (m, dc, r, l) => { list.Add(m); return true; }, IntPtr.Zero);
+            return list;
+        }
+
+        public static bool MonitorInfo(IntPtr mon, out RECT rc, out bool primary)
+        {
+            rc = new RECT();
+            primary = false;
+            var mi = new MONITORINFO();
+            mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+            if (!GetMonitorInfoW(mon, ref mi)) return false;
+            rc = mi.rcMonitor;
+            primary = (mi.dwFlags & 1) != 0;
+            return true;
+        }
+
+        public static bool SameRect(RECT a, RECT b)
+        {
+            return a.Left == b.Left && a.Top == b.Top && a.Right == b.Right && a.Bottom == b.Bottom;
+        }
 
         public static IntPtr FindMainWindow()
         {

@@ -309,6 +309,12 @@ namespace NeuTaskBar
             Invalidate();
         }
 
+        public void RefreshTint(uint t)
+        {
+            tintApplied = false;
+            SetTint(t);
+        }
+
         // Isla transparente: la tinta se elige según lo que se ve detrás (el escritorio, o el relleno de una ventana
         // maximizada). Se mira la franja de la isla que da al centro de la pantalla, donde no se dibuja nada.
         public void WatchBackdrop()
@@ -347,6 +353,7 @@ namespace NeuTaskBar
         }
 
         public bool Clear { get { return clear; } }
+        public uint TintValue { get { return tint; } }
 
         // Tinta del contenido: clara sobre islas oscuras y oscura sobre islas claras. v = gris sobre fondo oscuro.
         protected int Ink(int v)
@@ -643,6 +650,12 @@ namespace NeuTaskBar
                 // claro u oscuro, en vez de sumarse a ello.
                 surface.Resize(dc, w, h);
                 Gdi.FillRectColor(surface.Dc, new RECT(0, 0, w, h), 0);
+                if (!clear)
+                {
+                    IntPtr g = surface.BeginGraphics();
+                    Gfx.FillRect(g, 0, 0, w, h, tint);
+                    Gfx.End(g);
+                }
                 OnPaintContent(surface.Dc);
                 if (Outline)
                 {

@@ -61,7 +61,7 @@ namespace NeuTaskBar
         }
 
         // Registro mínimo para diagnosticar si el inicio con Windows llega a lanzar el motor.
-        static void Log(string text)
+        internal static void Log(string text)
         {
             try
             {

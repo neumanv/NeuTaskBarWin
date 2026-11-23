@@ -54,8 +54,8 @@ namespace NeuTaskBar
             wc.lpszClassName = ClassName;
             if (!classRegistered) { Native.RegisterClassW(ref wc); classRegistered = true; }
             // Siempre visible, como una barra de tareas, pero por debajo de las islas: se crea antes que ellas y después
-            // nunca se le cambia el orden Z.
-            hwnd = Native.CreateWindowExW(Native.WS_EX_TOPMOST | Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE, ClassName, "",
+            // nunca se le cambia el orden Z. Deja pasar los clics: es solo un relleno y no debe tapar la bandeja real.
+            hwnd = Native.CreateWindowExW(Native.WS_EX_TOPMOST | Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE | Native.WS_EX_TRANSPARENT, ClassName, "",
                 Native.WS_POPUP, 0, 0, 10, 10, IntPtr.Zero, IntPtr.Zero, wc.hInstance, IntPtr.Zero);
         }
 

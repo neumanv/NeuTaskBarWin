@@ -215,7 +215,7 @@ Las apps ancladas se guardan en `pins.txt`, en la misma carpeta, y los grupos en
 
 ## ⚠️ Limitaciones
 
-- Solo sustituye la barra del monitor principal.
+- En monitores secundarios se muestra la barra con las aplicaciones; no muestra iconos ocultos, batería, volumen ni otros controles del sistema.
 - Inicio, la configuración rápida y el calendario salen por donde Windows tiene su barra, aunque muevas las islas.
 - Los iconos de bandeja de otros programas no se dibujan en la isla: están en la flecha `^`.
 - El hueco entre las islas toma el color de la ventana maximizada, pero la app no dibuja ni recibe clics ahí. Si la ventana acaba en un fondo dibujado o en texto, cada panel se continúa con su color liso; si acaba en una imagen, con un solo color.

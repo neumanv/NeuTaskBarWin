@@ -113,11 +113,22 @@ $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path $csc)) { $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe' }
 $manifest = Join-Path $root 'app.manifest'
 
+# UI Automation (abrir el panel de iconos ocultos de Windows 11). Los ensamblados estan en la subcarpeta WPF del
+# compilador, no en la raiz de .NET Framework.
+$fwDir = Split-Path $csc
+$wpfDir = Join-Path $fwDir 'WPF'
+$uiaRefs = @()
+foreach ($dll in @('UIAutomationClient.dll', 'UIAutomationTypes.dll', 'WindowsBase.dll')) {
+    $ref = Join-Path $wpfDir $dll
+    if (-not (Test-Path $ref)) { throw "Falta $ref" }
+    $uiaRefs += "/r:$ref"
+}
+
 $sources = Get-ChildItem (Join-Path $root 'src') -Filter *.cs | ForEach-Object { $_.FullName }
 $exe = Join-Path $root 'NeuTaskBar.exe'
 & $csc /nologo /target:winexe /platform:anycpu /optimize+ /debug- /warn:4 "/out:$exe" "/win32manifest:$manifest" "/win32icon:$icon" `
     "/resource:$logoUi,logo.png" "/resource:$icon,app.ico" `
-    /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll $sources
+    /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll $uiaRefs $sources
 if ($LASTEXITCODE -ne 0) { throw "Fallo la compilacion de NeuTaskBar.exe" }
 
 $unSources = @(
